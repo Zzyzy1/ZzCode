@@ -35,6 +35,28 @@ ReAct 可以理解为 Reasoning + Acting：
 
 CLI 会把工具的名称、用途和参数结构发给模型。模型根据这些信息决定是否调用工具，并生成符合结构的参数。
 
+## 当前实现策略
+
+第一阶段先采用 `hello-agents/code/chapter4` 的教学版 ReAct 写法，而不是一开始就使用 OpenAI 的结构化 `tool_calls`。
+
+当前策略：
+
+```text
+PaiCLI：提供项目演进路线和功能目标
+hello-agents chapter4：提供第一版代码实现模板
+```
+
+也就是说，第一阶段先跑通文本协议：
+
+```text
+Thought: ...
+Action: ToolName[input]
+Observation: ...
+Action: Finish[最终答案]
+```
+
+等这个流程清楚之后，再升级为真实 OpenAI-compatible `tool_calls`。
+
 ## 第一阶段 Python 项目结构
 
 采用 Python 常见的 `src/` 布局：
@@ -42,17 +64,17 @@ CLI 会把工具的名称、用途和参数结构发给模型。模型根据这�
 ```text
 src/zzcode/
 ├── cli/
-│   └── main.py
+│   ├── main.py
+│   └── ui.py
 ├── agent/
-│   └── react.py
+│   └── react_text.py
 ├── llm/
-│   ├── base.py
-│   ├── mock.py
-│   └── openai_compatible.py
+│   └── client.py
 ├── tools/
-│   ├── base.py
-│   ├── registry.py
-│   └── builtin.py
+│   └── executor.py
+├── ui/
+│   ├── messages.py
+│   └── renderer.py
 └── runtime/
     └── config.py
 ```
@@ -63,9 +85,206 @@ src/zzcode/
 - `agent`：ReAct 主循环、消息历史、工具结果回灌。
 - `llm`：模型客户端抽象、Mock 模型、OpenAI 兼容模型调用。
 - `tools`：工具定义、工具 schema、工具注册表、工具执行。
+- `ui`：UI 消息模型和 inline renderer。
 - `runtime`：配置读取、运行时状态。
 
 这个结构是为 Python CLI 设计的，不照搬 PaiCLI 的 Java 目录。
+
+## Step 01：文本版 ReAct 内核
+
+当前已经先实现最小教学内核和交互式 CLI：
+
+```text
+src/zzcode/
+├── __init__.py
+├── agent/
+│   ├── __init__.py
+│   └── react_text.py
+├── llm/
+│   ├── __init__.py
+│   └── client.py
+├── cli/
+│   ├── __init__.py
+│   ├── main.py
+│   └── ui.py
+├── tools/
+    ├── __init__.py
+    └── executor.py
+└── ui/
+    ├── __init__.py
+    ├── messages.py
+    └── renderer.py
+```
+
+### 已实现内容
+
+- `ZzCodeLLM`：参考 hello-agents 的 `HelloAgentsLLM`，封装 OpenAI-compatible 模型调用。
+- `ThinkClient`：定义 TextReActAgent 需要的最小 LLM 协议。
+- `ToolExecutor`：参考 hello-agents 的 `ToolExecutor`，支持注册工具、查看工具、执行工具。
+- `TextReActAgent`：使用 `Thought/Action` 文本格式完成 ReAct 循环。
+- `REACT_PROMPT_TEMPLATE`：要求模型输出 `Thought:` 和 `Action:`。
+- Action 解析规则：支持 `ToolName[input]` 和 `Finish[最终答案]`。
+- `zzcode.cli.main`：交互式 CLI 入口，支持 `/help`、`/clear`、`/exit`。
+- `zzcode.cli.ui`：轻量终端 UI 层，优先使用 Rich；未安装 Rich 时退回纯文本输出。
+- 当前 demo 工具：`Echo` 和 `Calculator`，用于先验证 ReAct 工具调用链路。
+
+### 当前 Step 01 的边界
+
+这一步还没有实现：
+
+- 文件工具。
+- shell 工具。
+- OpenAI 结构化 `tool_calls`。
+- 测试文件。
+
+这一步的目的只是把 hello-agents chapter4 的 ReAct 核心方式迁移到 ZzCode 的 Python 包结构中。
+
+## Step 02：轻量 CLI 美化
+
+当前 CLI 已加入一版轻量美化，并在 Step 03 中进一步改成 Claude Code 风格的 inline 消息：
+
+- 启动时用面板展示版本、模式、模型和工具列表。
+- `/help` 用表格展示命令和工具。
+- 错误和警告使用统一样式。
+
+依赖文件：
+
+```text
+requirements.txt
+```
+
+当前只新增：
+
+```text
+rich>=13.7.0
+```
+
+本地如果没有 Rich，可以执行：
+
+```bash
+pip install -r requirements.txt
+```
+
+如果没有安装 Rich，CLI 仍然可以用纯文本模式运行。
+
+## Step 03：学习 Claude Code 的消息驱动渲染
+
+Claude Code 的 CLI 主界面不是散落的 `console.log`，而是：
+
+```text
+REPL
+  -> Messages
+    -> MessageRow
+      -> Message
+        -> AssistantTextMessage / AssistantToolUseMessage / UserTextMessage / SystemTextMessage
+```
+
+ZzCode 当前学习这个模式，做了一个最小 Python 版：
+
+```text
+Agent
+  -> UiMessage
+  -> InlineRenderer
+  -> Terminal
+```
+
+### 新增 UI 消息模型
+
+`src/zzcode/ui/messages.py` 定义当前几类消息：
+
+- `StepStarted`：Agent 开始新一轮。
+- `AssistantThought`：模型思考内容。
+- `ToolUse`：模型请求调用工具。
+- `ToolResult`：工具执行结果。
+- `FinalAnswer`：最终答案。
+- `SystemNotice`：系统提示、警告、错误。
+
+### 新增 inline renderer
+
+`src/zzcode/ui/renderer.py` 提供两个 renderer：
+
+- `PlainInlineRenderer`：无 Rich 时的纯文本展示。
+- `RichInlineRenderer`：Rich 版本的 Claude 风格 inline 展示。
+
+当前显示风格：
+
+```text
+Step 1/5
+● Thought
+  需要调用 Calculator 工具。
+● Calculator(1+2*3)
+  ⎿ 7
+
+Step 2/5
+● Final
+  结果是 7。
+```
+
+这个风格比大块 Panel 更接近 Claude Code：轻量、行内、适合连续对话。
+
+### 工具展示元数据
+
+`RegisteredTool` 新增 `display_name` 字段。后续可以继续演进为：
+
+```text
+user_facing_name(input)
+render_tool_use_message(input)
+render_tool_result(output)
+```
+
+这对应 Claude Code 中工具自己提供展示逻辑的模式。
+
+## Step 04：第一批真实 Code CLI 工具
+
+当前已经从教学工具过渡到基础 Code CLI 工具。
+
+新增文件：
+
+```text
+src/zzcode/tools/
+├── builtin.py
+└── safety.py
+```
+
+### 已实现工具
+
+| 工具名 | 用途 | 输入格式 |
+|---|---|---|
+| `list_files` | 列出项目内目录内容 | `path` |
+| `read_file` | 读取项目内 UTF-8 文本文件，最大 100KB | `path` |
+| `write_file` | 写入项目内文本文件 | `path|||content` |
+| `run_shell` | 在项目根目录执行简单 shell 命令 | `command` |
+
+`Calculator` 暂时保留为教学/调试工具，方便验证 ReAct 链路。
+
+### 文本版 write_file 协议
+
+由于当前还是 hello-agents 风格的文本 Action：
+
+```text
+Action: ToolName[input]
+```
+
+所以 `write_file` 暂时不能传 JSON 参数，先使用分隔符协议：
+
+```text
+Action: write_file[hello.txt|||hello zzcode]
+```
+
+后续升级到 OpenAI-compatible `tool_calls` 后，再把参数改成结构化 JSON：
+
+```json
+{"path": "hello.txt", "content": "hello zzcode"}
+```
+
+### 最小安全规则
+
+`safety.py` 当前包含两类基础防护：
+
+- 路径围栏：所有文件路径都会解析到项目根目录内，拒绝 `..` 或绝对路径逃逸。
+- 命令快速拒绝：拒绝明显危险命令，例如 `sudo`、`rm -rf /`、`shutdown`、`mkfs`、`dd of=` 等。
+
+这些规则不是沙箱，只是第一阶段的学习护栏。
 
 ## 最小 CLI 行为
 
