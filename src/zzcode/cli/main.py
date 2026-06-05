@@ -14,6 +14,11 @@ from zzcode.tools.executor import ToolExecutor
 
 
 def main() -> int:
+    """启动交互式 CLI。
+
+    负责创建 UI、LLM、工具注册表和 Agent；返回进程退出码。
+    """
+
     ui = create_ui()
     try:
         llm = ZzCodeLLM(stream=False)
@@ -37,6 +42,7 @@ def main() -> int:
         if not user_input:
             continue
 
+        # 斜杠命令由 CLI 自己处理，普通输入才交给 Agent。
         command = user_input.lower()
         if command in {"/exit", "/quit", "exit", "quit"}:
             ui.goodbye()
@@ -53,6 +59,11 @@ def main() -> int:
 
 
 def build_tools(project_root: Path) -> ToolExecutor:
+    """创建本次会话可用的工具集合。
+
+    project_root 表示工具操作的项目根目录；返回已注册内置工具的 ToolExecutor。
+    """
+
     tools = ToolExecutor()
     register_builtin_tools(tools, project_root)
 
@@ -67,6 +78,11 @@ def build_tools(project_root: Path) -> ToolExecutor:
 
 
 def calculate(expression: str) -> str:
+    """计算教学用四则运算表达式。
+
+    expression 是模型传入的算式字符串；返回计算结果或错误文本。
+    """
+
     try:
         result = safe_eval_arithmetic(expression)
     except Exception as exc:
@@ -75,11 +91,21 @@ def calculate(expression: str) -> str:
 
 
 def safe_eval_arithmetic(expression: str) -> int | float:
+    """安全计算简单算术表达式。
+
+    expression 只允许数字和基础运算符；返回 int 或 float。
+    """
+
     node = ast.parse(expression, mode="eval")
     return _eval_node(node.body)
 
 
 def _eval_node(node: ast.AST) -> int | float:
+    """递归求值 AST 节点。
+
+    node 是表达式 AST；返回该节点的数值结果，不支持的语法会抛 ValueError。
+    """
+
     binary_ops = {
         ast.Add: operator.add,
         ast.Sub: operator.sub,
@@ -96,6 +122,7 @@ def _eval_node(node: ast.AST) -> int | float:
 
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         return node.value
+    # 只允许白名单中的 AST 节点，避免 eval 执行任意 Python 代码。
     if isinstance(node, ast.BinOp) and type(node.op) in binary_ops:
         return binary_ops[type(node.op)](_eval_node(node.left), _eval_node(node.right))
     if isinstance(node, ast.UnaryOp) and type(node.op) in unary_ops:

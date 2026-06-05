@@ -259,6 +259,478 @@ src/zzcode/tools/
 
 ### 文本版 write_file 协议
 
+## Step 05：React + Ink UI 壳子
+
+为了更接近 Claude Code 的终端体验，第一阶段新增一个独立的 React + Ink 前端壳子。
+
+这个壳子不是替换 Python Agent Core，而是把“界面”和“智能体执行”先拆开：
+
+```text
+frontend/ React + Ink
+  -> 负责终端布局、输入框、消息列表、状态栏、工具展示
+
+src/zzcode/ Python Core
+  -> 负责 Agent 循环、LLM 调用、工具执行、安全边界
+```
+
+这样设计的原因是：UI 会长期存在，而 Agent 能力会持续变化。如果 UI 直接写死在 Python ReAct 循环里，后面接 MCP、Plan、Memory 时会频繁改 UI。先把 UI 做成事件驱动，就能让后续能力都只是在协议里新增事件或字段。
+
+### 当前新增目录
+
+```text
+frontend/
+├── package.json
+├── tsconfig.json
+└── src/
+    ├── index.tsx
+    ├── app/
+    │   ├── App.tsx
+    │   └── theme.ts
+    ├── screens/
+    │   ├── REPL.tsx
+    │   └── reducer.ts
+    ├── components/
+    │   ├── layout/
+    │   ├── messages/
+    │   ├── prompt/
+    │   ├── status/
+    │   └── tools/
+    └── protocol/
+        ├── events.ts
+        └── mockAgent.ts
+```
+
+### 当前已实现的 UI 能力
+
+- Messages：按事件流展示用户输入、Thought、工具调用、工具结果、Final。
+- ToolBlock：把 `tool_use` 和 `tool_result` 合并成 Claude 风格工具块。
+- PromptInput：终端单行输入，支持输入、回车发送、退格。
+- StatusBar：展示 ready、thinking、running tool、done，以及模型和工作目录。
+- reducer：集中维护消息列表和运行状态。
+- mockAgent：用异步事件模拟一次 Agent 回合。
+
+### JSON Lines 协议草案
+
+后续接 Python Core 时，前端不直接调用 Python 函数，而是通过标准输入输出传递 JSON Lines：
+
+```json
+{"type":"user_message","text":"读取 README.md"}
+{"type":"assistant_thought","text":"我需要读取文件"}
+{"type":"tool_use","id":"1","name":"read_file","input":"README.md","displayName":"Read"}
+{"type":"tool_result","id":"1","name":"read_file","ok":true,"output":"# ZzCode..."}
+{"type":"assistant_final","text":"README.md 的内容是..."}
+```
+
+当前先使用 `mockAgent.ts`，目的是只验证 UI 壳子。下一步再实现 Python 侧事件输出和 Node 侧 JSONL client。
+
+### 本地运行
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+运行后输入任意普通任务，可以看到一轮 mock 的 Thought、工具调用、工具结果和 Final。
+
+## Step 06：打通 Ink UI 和 Python Agent Core
+
+当前已经把 React + Ink UI 从 mock 事件流切换到真实 Python 后端。
+
+新的运行链路：
+
+```text
+用户在 Ink PromptInput 输入任务
+  -> frontend/src/protocol/pythonAgent.ts
+  -> 启动 python -m zzcode.protocol.server --once
+  -> Python server 读取 user_message JSON
+  -> TextReActAgent 调用 DeepSeek 和本地工具
+  -> JsonLineRenderer 输出 assistant_thought/tool_use/tool_result/assistant_final
+  -> Ink Messages 实时渲染事件流
+```
+
+### Python 侧新增模块
+
+```text
+src/zzcode/protocol/
+├── __init__.py
+├── events.py
+└── server.py
+```
+
+职责：
+
+- `server.py`：JSON Lines 后端入口，负责读取前端请求、组装 LLM/工具/Agent。
+- `events.py`：把 Python 内部 `UiMessage` 转换成前端 `AgentEvent`。
+
+为了保证 stdout 只输出 JSON Lines，`ZzCodeLLM` 的调试日志改为输出到 stderr。这样前端可以稳定解析 stdout。
+
+### 前端侧新增模块
+
+```text
+frontend/src/protocol/pythonAgent.ts
+```
+
+职责：
+
+- 启动 Python 子进程。
+- 设置 `PYTHONPATH=项目根/src`。
+- 把用户输入写成 `{"type":"user_message","text":"..."}`。
+- 逐行解析 Python stdout 中的 JSON Lines。
+- Python 退出异常时，把 stderr 转成 `system_notice`。
+
+### 当前运行方式
+
+默认真实后端：
+
+```powershell
+cd D:\zzy\JavaLearn\agent_learn\ZzCode\frontend
+npm run dev
+```
+
+只看 UI mock：
+
+```powershell
+$env:ZZCODE_USE_MOCK="1"
+npm run dev
+```
+
+如果 Windows 里没有 `python` 命令：
+
+```powershell
+$env:ZZCODE_PYTHON="py"
+npm run dev
+```
+
+### 当前边界
+
+- 现在每次用户输入都会启动一个 Python 子进程，简单可靠，便于学习。
+- Agent 的长会话记忆还没有跨请求保存。
+- 斜杠命令还没有迁移到 Ink UI。
+- 工具权限确认、文件 diff、流式 token 输出还没有实现。
+
+下一步可以把“一次一进程”改成“常驻 Python 会话”，同时实现 `/help`、`/clear`、`/exit` 等前端命令。
+
+## 前端 UI 优化阶段待办表
+
+当前目标是逐步把 Ink 壳子做成后续基本不用大改的完整 CLI UI。
+
+| Step | 内容 | 状态 |
+|---|---|---|
+| Step 07 | Slash Command 与会话控制 | 已完成 |
+| Step 08 | 常驻 Python backend session | 已完成 |
+| Step 09 | PromptInput 输入体验强化 | 已完成 |
+| Step 10 | 工具权限确认 UI | 已完成 |
+| Step 11 | 文件 diff 与工具结果展示 | 已完成 |
+| Step 12 | 状态栏、模式系统、工具 renderer 注册表 | 已完成 |
+
+## Step 07：Slash Command 与会话控制
+
+Ink 前端已经把斜杠命令从普通 Agent 请求中拆出来。
+
+当前支持：
+
+```text
+/help     显示帮助
+/clear    清空前端消息和 Python 会话历史
+/mock     在 mock/python 后端之间切换
+/mode     查看或切换 UI 模式
+/exit     退出 ZzCode
+/quit     退出 ZzCode
+```
+
+设计原则：
+
+- 普通输入才发送给 Python Agent。
+- `/xxx` 命令由 Ink 前端优先处理，不污染 Agent 上下文。
+- 未知命令显示 `system_notice`。
+- `/clear` 同时清空前端消息和后端短会话历史。
+- `/mode` 只切换当前 UI 模式状态，第一阶段暂不改变 Agent 行为。
+
+## Step 08：常驻 Python backend session
+
+前端已经从“一次输入启动一个 Python 进程”改为“复用一个 Python 后端进程”。
+
+当前链路：
+
+```text
+runPythonAgent(text)
+  -> getPythonSession()
+  -> stdin 写入 user_message JSONL
+  -> stdout 读取 AgentEvent JSONL
+  -> request_done 作为本次请求结束信号
+```
+
+Python server 新增控制请求：
+
+```json
+{"type":"clear_history"}
+{"type":"shutdown"}
+```
+
+并新增结束事件：
+
+```json
+{"type":"request_done","ok":true}
+```
+
+常驻会话的好处：
+
+- 不再每次输入都重新初始化 Python。
+- 后端可以保存短会话历史。
+- `/clear` 可以同步清理后端历史。
+- 后续权限确认、取消任务、流式输出都可以基于同一条协议继续扩展。
+
+当前跨轮历史采用短文本摘要，只保留最近几轮 `User/Assistant`。这是第一阶段的轻量实现，后续可以升级为更完整的上下文压缩机制。
+
+## Step 09：PromptInput 输入体验强化
+
+输入框仍然保持单行，但已经具备更接近真实 CLI 的编辑能力。
+
+当前支持：
+
+```text
+Enter     发送
+↑/↓       切换历史输入
+←/→       移动光标
+Ctrl+A    跳到行首
+Ctrl+E    跳到行尾
+Ctrl+U    清空当前输入
+Ctrl+C    当前输入为空时退出，否则清空输入
+```
+
+实现要点：
+
+- 输入框维护 `value`、`cursor`、`history`、`historyIndex`。
+- 普通输入和粘贴内容都按当前光标位置插入。
+- 历史输入只保留最近 30 条，并去重。
+- Agent 运行中禁用输入，避免并发请求打乱协议事件流。
+
+当前还没有做多行输入、命令补全、任务取消和复杂中文输入法适配，这些可以放到后续更完整的 PromptInput 阶段。
+
+## Step 10：工具权限确认 UI
+
+当前已经在工具执行前加入权限确认。
+
+新的执行链路：
+
+```text
+模型输出 Action: ToolName[input]
+  -> Agent 渲染 tool_use
+  -> Agent 调用 permission_checker
+  -> Python server 输出 permission_request
+  -> Ink UI 展示 PermissionPrompt
+  -> 用户选择 allow_once / allow_session / deny
+  -> Ink 写回 permission_response
+  -> Python 决定执行工具或把拒绝结果作为 Observation
+```
+
+协议新增事件：
+
+```json
+{"type":"permission_request","id":"permission-1","toolName":"write_file","displayName":"Write","input":"a.txt|||hello","risk":"medium"}
+{"type":"permission_response","id":"permission-1","decision":"allow_once"}
+```
+
+当前按工具名做轻量风险分级：
+
+| 工具 | 风险 |
+|---|---|
+| `run_shell` | high |
+| `write_file` | medium |
+| 其他工具 | low |
+
+Ink 权限确认选单：
+
+```text
+1. Allow once，本次允许
+2. Allow for session，本会话允许该工具
+3. Deny，拒绝执行
+
+↑/↓     移动选项
+Enter   确认当前选项
+1/2/3   直接选择对应选项
+```
+
+当前实现边界：
+
+- `allow_session` 以工具名为粒度，不区分具体参数。
+- 还没有做权限规则列表、撤销规则、危险命令详情解释。
+
+这些能力会进入后续 Step 12 或更完整的权限系统阶段。
+
+## Step 11：文件 diff 与工具结果展示
+
+当前已经给 `write_file` 权限确认加入写入前 diff 预览，并按工具类型优化结果展示。
+
+权限请求新增可选 `preview` 字段：
+
+```json
+{
+  "type": "permission_request",
+  "id": "permission-1",
+  "toolName": "write_file",
+  "displayName": "Write",
+  "input": "a.txt|||hello",
+  "risk": "medium",
+  "preview": {
+    "type": "write_file_diff",
+    "path": "a.txt",
+    "fileExists": false,
+    "oldLineCount": 0,
+    "newLineCount": 1,
+    "lines": [{"kind": "add", "text": "+hello"}],
+    "truncated": false
+  }
+}
+```
+
+实现要点：
+
+- 后端在 `PermissionBridge` 发出 `permission_request` 前解析 `write_file` 的 `path|||content`。
+- 后端读取项目内旧文件内容，使用 `difflib.unified_diff` 生成有限行数的 unified diff。
+- 前端 `PermissionPrompt` 在选项上方渲染 `DiffPreview`，用户确认前就能看到将创建或修改的内容。
+- 前端 `ToolResultView` 按工具名展示结果：`list_files` 展示列表，`read_file` 展示行号预览，`run_shell` 展示 stdout/stderr/exit code，`write_file` 展示写入摘要。
+
+当前实现边界：
+
+- diff 预览只支持 `write_file`，且依赖当前文本版 `path|||content` 协议。
+- diff 最多展示 80 行，超出后标记 truncated。
+- 非 UTF-8 旧文件无法生成 diff，会在权限面板显示错误说明。
+- 还没有做真正的结构化工具参数、语法高亮、折叠展开和 IDE diff。
+
+## Step 12：状态栏、模式系统、工具 renderer 注册表
+
+当前已经加入轻量模式系统、增强状态栏，并把工具结果展示改成 renderer 注册表。
+
+当前模式：
+
+```text
+default   默认模式
+readonly 只读观察
+plan     计划模式
+```
+
+当前 `/mode` 命令：
+
+```text
+/mode                 查看当前模式和可用模式
+/mode default         切回默认模式
+/mode readonly        切换为只读观察
+/mode plan            切换为计划模式
+```
+
+状态栏现在展示：
+
+```text
+运行状态
+最近工具
+当前 mode
+当前 backend
+当前 model
+当前 cwd
+权限等待状态
+```
+
+工具结果展示已经从 `if toolName === ...` 改为注册表：
+
+```text
+toolResultRenderers = {
+  list_files,
+  read_file,
+  run_shell,
+  write_file
+}
+```
+
+当前实现边界：
+
+- `readonly` 和 `plan` 目前只是 UI 模式状态，还没有影响 Python Agent prompt、工具权限或可用工具列表。
+- renderer 注册表只覆盖工具结果展示，权限 diff 预览仍是独立组件。
+- 还没有做模式持久化、模式快捷键和状态栏配置项。
+
+## 前端 UI 体验增强阶段
+
+这一阶段继续完善 Ink 前端的输入体验和启动界面。
+
+| Step | 内容 | 状态 |
+|---|---|---|
+| Step 13 | 多行输入 | 已完成 |
+| Step 14 | 输入框优化 | 已完成 |
+| Step 15 | 配色优化 | 已完成 |
+| Step 16 | 开始界面优化 | 已完成 |
+
+## Step 13：多行输入
+
+当前 `PromptInput` 已经从单行输入升级为多行输入。
+
+当前支持：
+
+```text
+Enter       发送
+Shift+Enter 插入换行
+\ + Enter   续行输入
+↑/↓         多行内移动；到边界后切换历史输入
+←/→         左右移动光标
+Ctrl+A/E    跳到当前行首/行尾
+Ctrl+U      清空当前行光标前内容
+Ctrl+C      当前输入为空时退出，否则清空输入
+```
+
+实现要点：
+
+- 参考 Claude 的输入思路，用全局 cursor offset 管理完整文本。
+- `↑/↓` 优先在多行内移动，移动不了时才触发历史输入切换。
+- 支持粘贴多行内容，按当前光标位置插入。
+
+## Step 14：输入框优化
+
+输入区域已经从裸文本行改为稳定的 prompt 面板。
+
+当前展示：
+
+```text
+zzcode › Enter send · Shift+Enter newline · \ + Enter continue · N lines
+> 当前输入内容
+· 后续输入行
+```
+
+实现边界：
+
+- 还没有做自动换行测量，只按显式换行渲染。
+- 还没有做命令补全、选择建议和 Vim 输入模式。
+
+## Step 15：配色优化
+
+当前主题已从高饱和终端色调整为柔和低饱和配色。
+
+主要变化：
+
+- 主色使用柔和浅蓝。
+- 用户色使用低饱和淡紫。
+- 成功、警告、危险色降低视觉刺激。
+- 边框使用灰蓝色，减少界面噪声。
+
+## Step 16：开始界面优化
+
+空消息状态已经改成欢迎页。
+
+欢迎页包含：
+
+```text
+Zz Code 标题
+卡通终端形象
+欢迎提示
+Tips & updates
+Quick commands
+```
+
+设计原则：
+
+- 参考 `docs/front.png` 的信息结构，但保持 Ink 终端可读。
+- 不引入图片依赖，使用终端字符绘制轻量卡通形象。
+- 首页只在消息为空时显示，用户发起任务后切换为事件消息流。
+
 由于当前还是 hello-agents 风格的文本 Action：
 
 ```text

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -11,14 +12,21 @@ from typing import Protocol
 
 
 class ThinkClient(Protocol):
-    """Minimal protocol required by the text ReAct agent."""
+    """文本 ReAct Agent 依赖的最小模型协议。"""
 
     def think(self, messages: list[dict[str, str]], temperature: float = 0) -> str | None:
-        """Return model text for the given chat messages."""
+        """请求模型生成文本。
+
+        messages 是 OpenAI-compatible 消息列表；temperature 控制随机性；
+        返回模型文本，失败时返回 None。
+        """
 
 
 class ZzCodeLLM:
-    """Small OpenAI-compatible client inspired by hello-agents chapter 4."""
+    """OpenAI-compatible LLM 客户端。
+
+    从参数或环境变量读取模型配置；think() 返回模型完整文本。
+    """
 
     def __init__(
         self,
@@ -43,10 +51,15 @@ class ZzCodeLLM:
             )
 
     def think(self, messages: list[dict[str, str]], temperature: float = 0) -> str | None:
-        """Call the model and return its full text response."""
+        """调用 Chat Completions 接口。
 
-        print(f"Calling model: {self.model}")
+        messages 是模型上下文；temperature 传给模型服务；
+        返回 assistant 文本，HTTP 或网络失败时返回 None。
+        """
+
+        print(f"Calling model: {self.model}", file=sys.stderr)
         try:
+            # 这里直接使用标准库 HTTP，避免第一阶段依赖 openai SDK。
             payload = {
                 "model": self.model,
                 "messages": messages,
@@ -65,17 +78,22 @@ class ZzCodeLLM:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 body = json.loads(response.read().decode("utf-8"))
             content = body["choices"][0]["message"].get("content") or ""
-            print(content)
+            print(content, file=sys.stderr)
             return content
         except urllib.error.HTTPError as exc:  # pragma: no cover - depends on remote provider
             error_body = exc.read().decode("utf-8", errors="replace")
-            print(f"LLM HTTP error {exc.code}: {error_body}")
+            print(f"LLM HTTP error {exc.code}: {error_body}", file=sys.stderr)
             return None
         except Exception as exc:  # pragma: no cover - depends on remote provider
-            print(f"LLM call failed: {exc}")
+            print(f"LLM call failed: {exc}", file=sys.stderr)
             return None
 
     def _chat_completions_url(self) -> str:
+        """拼出 Chat Completions 请求地址。
+
+        base_url 可以是服务根地址或完整 /chat/completions 地址；返回最终 URL。
+        """
+
         base = str(self.base_url).rstrip("/")
         if base.endswith("/chat/completions"):
             return base
@@ -83,12 +101,16 @@ class ZzCodeLLM:
 
 
 def load_env_file(path: str | os.PathLike[str] = ".env") -> None:
-    """Load simple KEY=VALUE pairs without requiring python-dotenv."""
+    """读取简单 .env 文件。
+
+    path 是 env 文件路径；函数只写入尚未存在的环境变量，不返回值。
+    """
 
     env_path = Path(path)
     if not env_path.exists():
         return
 
+    # 只支持 KEY=VALUE 子集，够第一阶段使用，也避免引入 python-dotenv。
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:

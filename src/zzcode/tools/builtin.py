@@ -15,7 +15,10 @@ WRITE_FILE_SEPARATOR = "|||"
 
 
 def register_builtin_tools(executor: ToolExecutor, project_root: Path) -> None:
-    """注册第一批真实 Code CLI 工具。"""
+    """注册第一批真实 Code CLI 工具。
+
+    executor 是工具注册表；project_root 是工具允许操作的项目根目录；无返回值。
+    """
 
     root = project_root.resolve()
     executor.register_tool(
@@ -45,6 +48,11 @@ def register_builtin_tools(executor: ToolExecutor, project_root: Path) -> None:
 
 
 def list_files(project_root: Path, tool_input: str) -> str:
+    """列出项目内目录内容。
+
+    project_root 是项目根目录；tool_input 是模型传入的目录路径；返回目录项文本。
+    """
+
     path = resolve_project_path(project_root, tool_input or ".")
     if not path.exists():
         return f"路径不存在: {path.relative_to(project_root)}"
@@ -63,6 +71,11 @@ def list_files(project_root: Path, tool_input: str) -> str:
 
 
 def read_file(project_root: Path, tool_input: str) -> str:
+    """读取项目内 UTF-8 文本文件。
+
+    project_root 是项目根目录；tool_input 是文件路径；返回文件内容或错误说明。
+    """
+
     path = resolve_project_path(project_root, tool_input)
     if not path.exists():
         return f"文件不存在: {path.relative_to(project_root)}"
@@ -81,9 +94,15 @@ def read_file(project_root: Path, tool_input: str) -> str:
 
 
 def write_file(project_root: Path, tool_input: str) -> str:
+    """写入项目内文本文件。
+
+    tool_input 使用 path|||content 文本协议；返回写入结果或错误说明。
+    """
+
     if WRITE_FILE_SEPARATOR not in tool_input:
         return f"参数格式错误。请使用: path{WRITE_FILE_SEPARATOR}content"
 
+    # 文本版 ReAct 还没有 JSON 参数，因此先用固定分隔符承载 path 和 content。
     path_text, content = tool_input.split(WRITE_FILE_SEPARATOR, 1)
     path = resolve_project_path(project_root, path_text)
     try:
@@ -95,6 +114,11 @@ def write_file(project_root: Path, tool_input: str) -> str:
 
 
 def run_shell(project_root: Path, tool_input: str) -> str:
+    """在项目根目录执行 shell 命令。
+
+    project_root 是命令工作目录；tool_input 是命令文本；返回 stdout/stderr/exit_code。
+    """
+
     command = tool_input.strip()
     reject_dangerous_command(command)
 

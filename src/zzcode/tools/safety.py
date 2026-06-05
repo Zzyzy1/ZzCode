@@ -25,7 +25,10 @@ DANGEROUS_COMMAND_PATTERNS = (
 
 
 def resolve_project_path(project_root: Path, user_path: str) -> Path:
-    """把模型给出的相对路径解析到项目内，并拒绝越界访问。"""
+    """把模型给出的路径解析到项目内。
+
+    project_root 是允许访问的根目录；user_path 是模型传入路径；返回安全的绝对路径。
+    """
 
     clean_path = (user_path or ".").strip().strip('"').strip("'")
     candidate = Path(clean_path)
@@ -43,8 +46,12 @@ def resolve_project_path(project_root: Path, user_path: str) -> Path:
 
 
 def reject_dangerous_command(command: str) -> None:
-    """在执行 shell 前做一层快速拒绝，避免明显危险命令进入 subprocess。"""
+    """拒绝明显危险的 shell 命令。
 
+    command 是待执行命令；命中危险规则时抛 ValueError，否则返回 None。
+    """
+
+    # 先做字符串级规则匹配，覆盖 rm -rf /、curl|sh 这类高风险组合。
     normalized = " ".join(command.strip().lower().split())
     if not normalized:
         raise ValueError("命令不能为空。")
@@ -58,5 +65,6 @@ def reject_dangerous_command(command: str) -> None:
     except ValueError as exc:
         raise ValueError(f"命令解析失败: {exc}") from exc
 
+    # 再看命令首词，避免 sudo echo 这类没有命中片段但仍需提权的形式。
     if parts and parts[0] in {"sudo", "su"}:
         raise ValueError(f"拒绝执行需要提升权限的命令: {parts[0]}")

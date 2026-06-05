@@ -25,17 +25,30 @@ class AgentRenderer(Protocol):
 
 
 class PlainUI:
-    """Fallback UI used when rich is not installed."""
+    """CLI 外壳的纯文本实现。
+
+    负责 banner/help/prompt 等交互外壳，并把 Agent 消息交给 inline renderer。
+    """
 
     def __init__(self) -> None:
         self.inline = PlainInlineRenderer()
 
     def banner(self, model: str, tools: ToolExecutor) -> None:
+        """打印启动信息。
+
+        model 是当前模型名；tools 是本次会话工具集合；无返回值。
+        """
+
         print(f"ZzCode {__version__} - Text ReAct CLI")
         print(f"Model: {model}")
         print(f"Tools: {tools.tool_names_text()}")
 
     def help(self, tools: ToolExecutor) -> None:
+        """打印帮助信息。
+
+        tools 是本次会话工具集合；无返回值。
+        """
+
         print(
             """
 Commands:
@@ -55,6 +68,11 @@ Tools:
         print("bye")
 
     def prompt(self) -> str:
+        """读取一行用户输入。
+
+        返回用户输入的原始字符串。
+        """
+
         return input("\nzzcode> ")
 
     def step(self, step: int, max_steps: int) -> None:
@@ -79,6 +97,11 @@ Tools:
         self.render(SystemNotice(text=text, level="error"))
 
     def render(self, message: UiMessage) -> None:
+        """渲染 Agent 产生的 UI 消息。
+
+        message 是统一消息模型；无返回值。
+        """
+
         self.inline.render(message)
 
     def step(self, step: int, max_steps: int) -> None:
@@ -101,7 +124,7 @@ Tools:
 
 
 class RichUI(PlainUI):
-    """Rich-powered inline terminal UI."""
+    """CLI 外壳的 Rich 实现。"""
 
     def __init__(self) -> None:
         from rich.console import Console
@@ -127,6 +150,7 @@ class RichUI(PlainUI):
         from rich.table import Table
         from rich.markup import escape
 
+        # help 保留表格形态，方便用户快速扫描命令和工具说明。
         commands = Table(show_header=True, header_style="bold cyan")
         commands.add_column("Command", style="bold")
         commands.add_column("Description")
@@ -162,7 +186,10 @@ class RichUI(PlainUI):
 
 
 def create_ui() -> PlainUI:
-    """Create the best available UI without making rich mandatory at import time."""
+    """创建可用的 CLI UI。
+
+    优先返回 RichUI；如果本地没安装 Rich，则退回 PlainUI。
+    """
 
     try:
         return RichUI()

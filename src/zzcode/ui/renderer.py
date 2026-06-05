@@ -17,13 +17,24 @@ from .messages import (
 
 class InlineRenderer(Protocol):
     def render(self, message: UiMessage) -> None:
-        """Render a UI message."""
+        """渲染一条 UI 消息。
+
+        message 是 Agent 产生的 UI 消息；无返回值。
+        """
 
 
 class PlainInlineRenderer:
-    """Plain text fallback renderer."""
+    """纯文本 renderer。
+
+    在未安装 Rich 时使用，保证 CLI 仍然可运行。
+    """
 
     def render(self, message: UiMessage) -> None:
+        """按消息类型输出纯文本。
+
+        message 是 UI 消息对象；无返回值。
+        """
+
         if isinstance(message, StepStarted):
             print(f"\n--- Step {message.step}/{message.max_steps} ---")
         elif isinstance(message, AssistantThought):
@@ -40,7 +51,10 @@ class PlainInlineRenderer:
 
 
 class RichInlineRenderer:
-    """Rich renderer with Claude-like inline message styling."""
+    """Rich 版 inline renderer。
+
+    用轻量的 ● 和 ⎿ 风格模拟 Claude Code 的消息流。
+    """
 
     def __init__(self, console: object | None = None) -> None:
         if console is None:
@@ -50,6 +64,11 @@ class RichInlineRenderer:
         self.console = console
 
     def render(self, message: UiMessage) -> None:
+        """按消息类型分发到具体渲染方法。
+
+        message 是 UI 消息对象；无返回值。
+        """
+
         if isinstance(message, StepStarted):
             self._step(message)
         elif isinstance(message, AssistantThought):
@@ -76,6 +95,7 @@ class RichInlineRenderer:
         from rich.markup import escape
 
         label = message.display_name or message.name
+        # 模型输出可能包含 [] 等 Rich markup 字符，必须转义后再渲染。
         self.console.print(
             f"[bold yellow]● {escape(label)}[/bold yellow]([dim]{escape(message.tool_input)}[/dim])"
         )
