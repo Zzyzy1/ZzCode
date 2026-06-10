@@ -6,6 +6,7 @@ import type { AgentEvent, PermissionDecision, PermissionRequestEvent } from "./e
 type ProtocolRequest =
   | { type: "user_message"; text: string }
   | { type: "clear_history" }
+  | { type: "compact_history" }
   | { type: "shutdown" }
   | { type: "permission_response"; id: string; decision: PermissionDecision };
 
@@ -31,6 +32,14 @@ export async function* clearPythonSession(): AsyncGenerator<AgentEvent> {
   yield* getPythonSession().request({ type: "clear_history" });
 }
 
+/**
+ * 压缩 Python 后端短期会话历史。
+ * 返回后端确认事件，压缩摘要会在后续请求中继续注入。
+ */
+export async function* compactPythonSession(): AsyncGenerator<AgentEvent> {
+  yield* getPythonSession().request({ type: "compact_history" });
+}
+
 export function shutdownPythonSession(): void {
   sharedSession?.shutdown();
   sharedSession = null;
@@ -47,6 +56,7 @@ class PythonAgentSession {
   private child: ChildProcessWithoutNullStreams;
   private queue = new EventQueue();
   private stderr = "";
+  private stderrLineBuffer = "";
   closed = false;
 
   constructor() {
@@ -111,6 +121,7 @@ class PythonAgentSession {
     this.child.stderr.setEncoding("utf8");
     this.child.stderr.on("data", (chunk) => {
       this.stderr += chunk;
+      this.handleStderrChunk(chunk);
     });
 
     const lines = createInterface({
@@ -141,6 +152,22 @@ class PythonAgentSession {
       this.queue.push({ type: "system_notice", level: "error", text: `无法启动 Python 后端: ${error.message}` });
       this.queue.push({ type: "request_done", ok: false });
     });
+  }
+
+  private handleStderrChunk(chunk: string): void {
+    this.stderrLineBuffer += chunk;
+    const lines = this.stderrLineBuffer.split(/\r?\n/);
+    this.stderrLineBuffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (line.startsWith("[zzcode memory] ")) {
+        this.queue.push({
+          type: "system_notice",
+          level: "info",
+          text: line.slice("[zzcode memory] ".length)
+        });
+      }
+    }
   }
 }
 

@@ -13,6 +13,7 @@ from typing import Any, Iterable, TextIO
 from zzcode.agent.react_text import TextReActAgent
 from zzcode.cli.main import build_tools
 from zzcode.llm.client import ZzCodeLLM
+from zzcode.memory import ShortTermSessionMemory, build_memory_context
 from zzcode.protocol.events import JsonLineEventWriter, JsonLineRenderer
 from zzcode.tools.builtin import WRITE_FILE_SEPARATOR
 from zzcode.tools.safety import resolve_project_path
@@ -41,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     project_root = Path(os.getenv("ZZCODE_PROJECT_ROOT") or Path.cwd()).resolve()
+    _debug_memory(f"server started project_root={project_root}")
     tools = build_tools(project_root)
     permission_bridge = PermissionBridge(sys.stdin, writer)
     renderer = JsonLineRenderer(writer)
@@ -51,14 +53,41 @@ def main(argv: list[str] | None = None) -> int:
         renderer=renderer,
         permission_checker=permission_bridge.request_permission,
     )
-    session_history: list[str] = []
+    session_memory = ShortTermSessionMemory()
 
     for request in _read_requests(sys.stdin):
         request_type = request.get("type")
         if request_type == "clear_history":
-            session_history.clear()
+            _debug_memory(f"clear history previous_items={len(session_memory)}")
+            session_memory.clear()
             agent.history = []
             writer.write({"type": "system_notice", "level": "info", "text": "会话历史已清空。"})
+            writer.write({"type": "request_done", "ok": True})
+            continue
+        if request_type == "compact_history":
+            result = session_memory.compact(reason="manual")
+            _debug_memory(
+                "manual compact "
+                f"compacted={result.compacted} "
+                f"reason={result.reason} "
+                f"removed_items={result.removed_items} "
+                f"kept_items={result.kept_items} "
+                f"summary_chars={result.summary_chars}"
+            )
+            if result.compacted:
+                writer.write(
+                    {
+                        "type": "system_notice",
+                        "level": "info",
+                        "text": (
+                            "会话已压缩："
+                            f"折叠 {result.removed_items} 条历史，"
+                            f"保留 {result.kept_items} 条最近上下文。"
+                        ),
+                    }
+                )
+            else:
+                writer.write({"type": "system_notice", "level": "info", "text": "当前会话历史还不需要压缩。"})
             writer.write({"type": "request_done", "ok": True})
             continue
         if request_type == "shutdown":
@@ -74,11 +103,55 @@ def main(argv: list[str] | None = None) -> int:
 
         # 前端通过 user_message 发起请求；后端回显同一事件，让消息流完全来自协议。
         writer.write({"type": "user_message", "text": text})
-        answer = agent.run(text, session_context=_format_session_history(session_history))
+        memory_context = build_memory_context(
+            project_root,
+            session_memory.as_list(),
+            compact_summary=session_memory.compact_summary(),
+        )
+        _debug_memory(
+            "request "
+            f"user={_compact_debug_text(text)} "
+            f"instruction_files={memory_context.instruction_count} "
+            f"instruction_chars={memory_context.instruction_chars} "
+            f"session_items={memory_context.session_items} "
+            f"compact_summary_chars={memory_context.compact_summary_chars} "
+            f"session_notes_chars={memory_context.session_notes_chars} "
+            f"context_chars={len(memory_context.text)}"
+        )
+        if memory_context.text:
+            _debug_memory(f"context {_compact_debug_text(memory_context.text, max_length=500)}")
+
+        answer = agent.run(text, session_context=memory_context.text)
         if answer:
-            session_history.append(f"User: {text}")
-            session_history.append(f"Assistant: {answer}")
-            del session_history[:-12]
+            removed_count = session_memory.record_turn(text, answer)
+            if removed_count:
+                _debug_memory(f"trimmed history removed_items={removed_count}")
+            compact_result = session_memory.compact_if_needed()
+            if compact_result.compacted:
+                _debug_memory(
+                    "auto compact "
+                    f"removed_items={compact_result.removed_items} "
+                    f"kept_items={compact_result.kept_items} "
+                    f"summary_chars={compact_result.summary_chars}"
+                )
+                writer.write(
+                    {
+                        "type": "system_notice",
+                        "level": "info",
+                        "text": (
+                            "已自动压缩短期会话历史："
+                            f"折叠 {compact_result.removed_items} 条，"
+                            f"保留 {compact_result.kept_items} 条。"
+                        ),
+                    }
+                )
+            _debug_memory(
+                "saved turn "
+                f"answer={_compact_debug_text(answer)} "
+                f"session_items={len(session_memory)}"
+            )
+        else:
+            _debug_memory("request finished without answer; turn was not saved")
         writer.write({"type": "request_done", "ok": answer is not None})
 
         if args.once:
@@ -121,13 +194,21 @@ def _extract_user_text(request: dict[str, Any]) -> str:
     return text.strip() if isinstance(text, str) else ""
 
 
-def _format_session_history(session_history: list[str]) -> str:
-    """格式化跨轮会话历史。
+def _debug_memory(message: str) -> None:
+    """输出记忆调试日志到 stderr，避免破坏 stdout JSONL 协议。"""
 
-    session_history 是短会话摘要列表；返回适合放进 prompt 的文本。
-    """
+    if os.getenv("ZZCODE_DEBUG_MEMORY", "1").lower() in {"0", "false", "no"}:
+        return
+    print(f"[zzcode memory] {message}", file=sys.stderr, flush=True)
 
-    return "\n".join(session_history[-12:])
+
+def _compact_debug_text(text: str, max_length: int = 160) -> str:
+    """压缩调试文本，避免长对话把控制台刷满。"""
+
+    compacted = " ".join(text.split())
+    if len(compacted) <= max_length:
+        return compacted
+    return f"{compacted[:max_length]}..."
 
 
 class PermissionBridge:

@@ -6,8 +6,9 @@ import { PromptInput } from "../components/prompt/PromptInput.js";
 import { StatusBar } from "../components/status/StatusBar.js";
 import { PermissionPrompt } from "../components/tools/PermissionPrompt.js";
 import { appModes, describeMode, isAppMode, type AppMode } from "../app/modes.js";
+import { formatMemoryList, memoryCommandHelp, openMemoryFile, type MemoryTarget } from "../memory/memoryCommands.js";
 import { runMockAgent } from "../protocol/mockAgent.js";
-import { clearPythonSession, runPythonAgent, shutdownPythonSession } from "../protocol/pythonAgent.js";
+import { clearPythonSession, compactPythonSession, runPythonAgent, shutdownPythonSession } from "../protocol/pythonAgent.js";
 import type { AgentEvent, PermissionDecision, PermissionRequestEvent } from "../protocol/events.js";
 import { replReducer } from "./reducer.js";
 
@@ -82,6 +83,16 @@ export function REPL() {
       appendNotice("前端消息已清空。");
       return;
     }
+    if (command === "/compact") {
+      if (backendMode !== "python") {
+        appendNotice("mock 后端没有可压缩的 Python 会话历史。", "warning");
+        return;
+      }
+      for await (const event of compactPythonSession()) {
+        dispatch({ type: "append_event", event });
+      }
+      return;
+    }
     if (command === "/mock") {
       const nextMode = backendMode === "mock" ? "python" : "mock";
       setBackendMode(nextMode);
@@ -90,6 +101,10 @@ export function REPL() {
     }
     if (command === "/mode") {
       handleModeCommand(value);
+      return;
+    }
+    if (command === "/memory") {
+      await handleMemoryCommand(value);
       return;
     }
     if (command === "/exit" || command === "/quit") {
@@ -143,6 +158,26 @@ export function REPL() {
     setAppMode(rawMode);
     appendNotice(`模式已切换为 ${rawMode}（${describeMode(rawMode)}）。`);
   }
+
+  async function handleMemoryCommand(value: string) {
+    const [, rawSubcommand] = value.trim().split(/\s+/, 2);
+    const subcommand = rawSubcommand || "list";
+    if (subcommand === "list") {
+      appendNotice(await formatMemoryList());
+      return;
+    }
+    if (isMemoryTarget(subcommand)) {
+      appendNotice(`正在打开 ${subcommand} 记忆文件...`);
+      try {
+        appendNotice(await openMemoryFile(subcommand));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        appendNotice(`打开记忆文件失败：${message}`, "error");
+      }
+      return;
+    }
+    appendNotice(memoryCommandHelp(), "warning");
+  }
 }
 
 function helpText(): string {
@@ -150,8 +185,10 @@ function helpText(): string {
     "Commands:",
     "  /help     显示帮助",
     "  /clear    清空前端消息和 Python 会话历史",
+    "  /compact  压缩 Python 短期会话历史",
     "  /mock     在 mock/python 后端之间切换",
     "  /mode     查看或切换模式：/mode default|readonly|plan",
+    "  /memory   查看或编辑记忆文件",
     "  /exit     退出 ZzCode",
     "",
     "Input:",
@@ -161,6 +198,10 @@ function helpText(): string {
     "  Ctrl+A/E  跳到行首/行尾",
     "  Ctrl+U    清空当前输入"
   ].join("\n");
+}
+
+function isMemoryTarget(value: string): value is MemoryTarget {
+  return value === "user" || value === "project" || value === "local" || value === "session";
 }
 
 function permissionDecisionText(request: PermissionRequestEvent, decision: PermissionDecision): string {

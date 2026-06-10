@@ -1,187 +1,71 @@
 # ZzCode
 
-一个用于学习现代 Code Agent 工作机制的 Python + React Ink 终端编程助手。
+ZzCode 是一个用于学习现代 Code Agent 工作机制的 Python + React Ink 终端编程助手。
 
-ZzCode 的目标不是一开始就做成完整的 Claude Code，而是从最小 ReAct + Tool Call 循环开始，逐步理解终端智能体中的模型调用、工具执行、权限确认、事件协议和前端交互。
+它不是为了直接复刻完整的 Claude Code，而是从一个可运行、可调试、可逐步扩展的最小 Agent 开始，分阶段理解终端智能体中的 ReAct、工具调用、权限确认、上下文记忆、前后端协议和 TUI 交互。
 
 ![ZzCode terminal UI](docs/img/1.png)
 
-## What It Does
+## Overview
 
-ZzCode 当前已经跑通一个可交互的 Code Agent CLI：
+ZzCode 当前的核心形态是一个本地 Code Agent CLI：
 
 ```text
-用户输入任务
-  -> 模型判断是否需要调用工具
-  -> Python 后端执行本地工具
-  -> 工具结果回灌给模型
-  -> 模型继续推理或输出最终答案
+Terminal UI
+  -> JSON Lines Protocol
+  -> Python Agent Core
+  -> LLM Provider
+  -> Tool Registry
+  -> Local Tool Execution
 ```
 
-当前重点是学习和拆解核心机制，而不是追求生产级完整能力。
+前端负责终端交互和消息展示，后端负责 Agent 主循环、模型调用、工具执行和上下文管理。两侧通过事件协议通信，便于后续继续扩展 Memory、Plan Mode、MCP 和多 Agent 能力。
 
-## Features
+## Capabilities
 
-- Python 版 ReAct Agent 主循环
-- OpenAI-compatible LLM Client
-- 内置本地工具：`list_files`、`read_file`、`write_file`、`run_shell`
+- ReAct 风格 Agent 主循环
+- OpenAI-compatible LLM 接入
+- 本地文件和命令工具
 - React + Ink 终端 UI
-- JSON Lines 前后端事件协议
-- 常驻 Python backend session
-- Slash Commands：`/help`、`/clear`、`/mock`、`/mode`、`/exit`
-- 多行输入、历史输入、光标编辑
+- JSON Lines 前后端通信
 - 工具执行前权限确认
-- `write_file` 执行前 diff 预览
-- 按工具类型展示结果
-- 柔和终端配色和欢迎页
+- 多行输入和历史输入
+- Markdown 风格记忆文件
+- 当前会话短期记忆
+- Session notes 和基础 Compact 支持
 
 ## Architecture
 
 ```text
-frontend/ React + Ink
-  -> terminal UI
-  -> prompt input
-  -> message rendering
-  -> permission prompt
-  -> JSON Lines client
-
-src/zzcode/ Python Core
-  -> Agent loop
-  -> LLM client
-  -> tool registry
-  -> local tool execution
-  -> JSON Lines server
-```
-
-前端不直接依赖 Python Agent 内部实现，只通过 JSON Lines 事件通信。这样后续接入 MCP、Memory、Plan Mode 或多 Agent 时，可以优先扩展协议和后端能力，而不是重写 UI。
-
-## Project Structure
-
-```text
 ZzCode/
-├── README.md
-├── AGENTS.md
-├── docs/
-│   ├── img/
-│   │   └── 1.png
-│   └── phase-01-react-toolcall-demo.md
-├── frontend/
-│   ├── package.json
-│   └── src/
-├── src/
-│   └── zzcode/
-│       ├── agent/
-│       ├── cli/
-│       ├── llm/
-│       ├── protocol/
-│       ├── runtime/
-│       ├── tools/
-│       └── ui/
-└── tests/
+├── frontend/          React + Ink terminal UI
+├── src/zzcode/        Python Agent core
+│   ├── agent/         ReAct loop
+│   ├── llm/           model provider adapter
+│   ├── memory/        markdown memory and context
+│   ├── protocol/      JSON Lines backend
+│   └── tools/         local tool registry
+├── docs/              phase notes and design records
+└── tests/             focused behavior tests
 ```
 
-## Quick Start
+## Learning Roadmap
 
-### React + Ink UI
+ZzCode 按阶段推进，每个阶段都优先让核心机制清晰可见：
 
-```bash
-cd frontend
-npm install
-npm run dev
-```
+1. ReAct + Tool Call 最小闭环
+2. React + Ink 终端 UI 和 JSON Lines 协议
+3. 工具权限确认和文件变更预览
+4. Claude Code 风格 Markdown Memory
+5. Session Memory 和基础 Compact
+6. Plan Mode
+7. MCP 接入
+8. 多 Agent / 子 Agent
 
-默认会启动 Python JSON Lines 后端，驱动现有 `TextReActAgent`、DeepSeek 和本地工具。
+## Documentation
 
-如果只想看 UI mock 效果：
+- [AGENTS.md](AGENTS.md)：项目协作规则、架构约定和注释规范
+- [docs/phase-01-react-toolcall-demo.md](docs/phase-01-react-toolcall-demo.md)：第一阶段 ReAct + Tool Call 学习记录
+- [docs/phase-02-memory-system.md](docs/phase-02-memory-system.md)：第二阶段 Memory System 学习记录
 
-```powershell
-$env:ZZCODE_USE_MOCK="1"
-npm run dev
-```
-
-如果 Windows 环境中 `python` 命令不可用：
-
-```powershell
-$env:ZZCODE_PYTHON="py"
-npm run dev
-```
-
-### Python Teaching CLI
-
-```bash
-PYTHONPATH=src python -m zzcode.cli.main
-```
-
-## Commands
-
-```text
-/help     显示帮助
-/clear    清空前端消息和 Python 会话历史
-/mock     在 mock/python 后端之间切换
-/mode     查看或切换模式：default / readonly / plan
-/exit     退出 ZzCode
-```
-
-## Input
-
-```text
-Enter       发送
-Shift+Enter 插入换行
-\ + Enter   续行输入
-↑/↓         多行内移动；到边界后切换历史输入
-←/→         移动光标
-Ctrl+A/E    跳到行首/行尾
-Ctrl+U      清空当前行光标前内容
-Ctrl+C      当前输入为空时退出，否则清空输入
-```
-
-## Tool Permissions
-
-工具执行前会进入权限确认界面：
-
-```text
-↑/↓       移动选项
-Enter     确认当前选项
-1/2/3     直接选择对应选项
-```
-
-`write_file` 会在确认前展示 diff 预览，帮助用户看清楚即将写入的内容。
-
-## Current Phase
-
-当前处于第一阶段：**ReAct + Tool Call Demo**。
-
-已经完成：
-
-- CLI 交互入口
-- ReAct Agent 主循环
-- Mock LLM Client
-- OpenAI-compatible LLM Client
-- 工具注册表
-- 基础文件和 shell 工具
-- React + Ink UI 壳子
-- JSON Lines 前后端通信
-- 常驻 Python backend session
-- 工具权限确认
-- 文件 diff 预览
-- 多行输入和启动欢迎页
-
-## Roadmap
-
-后续计划按学习进度逐步推进：
-
-- 更安全的文件和命令工具
-- 配置系统
-- 更完整的测试覆盖
-- Plan Mode
-- Memory 与上下文管理
-- MCP 接入
-- 多 Agent
-- 更完整的终端 UI
-
-## Learning Notes
-
-- `AGENTS.md`：项目协作说明、架构约定和阶段规划
-- `docs/phase-01-react-toolcall-demo.md`：第一阶段实现方案和学习笔记
-
-ZzCode 会参考 PaiCLI、hello-agents、Claude Code 等工具的思想，但实现上保持 Python CLI 项目的自然组织方式，优先让每个阶段的核心机制清晰可读。
+README 只保留项目展示和总体框架。具体设计取舍、实现步骤、验收记录和后续 TODO 放在 `docs/` 中维护。
