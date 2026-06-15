@@ -1,4 +1,4 @@
-"""Session Memory Markdown 文件支持。"""
+"""Session notes markdown 文件支持。"""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ DEFAULT_SESSION_NOTES_MAX_CHARS = 8000
 
 
 def get_session_notes_path(project_root: Path) -> Path:
-    """返回当前项目的 Session Memory Markdown 路径。"""
+    """返回当前项目的 session notes markdown 路径。"""
 
     return project_root / ".zzcode" / "session" / "notes.md"
 

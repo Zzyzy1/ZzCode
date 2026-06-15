@@ -5,10 +5,13 @@ from __future__ import annotations
 import ast
 import operator
 from pathlib import Path
+from typing import Callable
 
 from zzcode.agent.react_text import TextReActAgent
 from zzcode.cli.ui import create_ui
-from zzcode.llm.client import ZzCodeLLM
+from zzcode.llm.client import ThinkClient, ZzCodeLLM
+from zzcode.memory.session_scope import SessionScope
+from zzcode.subagents.tool import register_agent_tool
 from zzcode.tools.builtin import register_builtin_tools
 from zzcode.tools.executor import ToolExecutor
 
@@ -58,7 +61,14 @@ def main() -> int:
         agent.run(user_input)
 
 
-def build_tools(project_root: Path) -> ToolExecutor:
+def build_tools(
+    project_root: Path,
+    *,
+    llm_client: ThinkClient | None = None,
+    session_scope: SessionScope | None = None,
+    permission_checker: Callable[[str, str, str | None], bool] | None = None,
+    session_context_provider: Callable[[], str] | None = None,
+) -> ToolExecutor:
     """创建本次会话可用的工具集合。
 
     project_root 表示工具操作的项目根目录；返回已注册内置工具的 ToolExecutor。
@@ -74,6 +84,15 @@ def build_tools(project_root: Path) -> ToolExecutor:
         calculate,
         display_name="Calculator",
     )
+    if llm_client is not None and session_scope is not None:
+        register_agent_tool(
+            tools,
+            project_root=project_root,
+            llm_client=llm_client,
+            session_scope=session_scope,
+            permission_checker=permission_checker,
+            session_context_provider=session_context_provider,
+        )
     return tools
 
 

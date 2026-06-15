@@ -6,8 +6,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from .auto import read_auto_memory_index
 from .loader import LoadedInstructionMemory, load_instruction_memories
 from .session_notes import read_session_notes
+from .session_scope import SessionScope, read_current_session_memory
 
 
 MEMORY_INSTRUCTION_PROMPT = (
@@ -29,6 +31,8 @@ class MemoryContext:
     session_items: int
     compact_summary_chars: int = 0
     session_notes_chars: int = 0
+    auto_memory_chars: int = 0
+    current_session_memory_chars: int = 0
 
 
 def build_memory_context(
@@ -36,6 +40,7 @@ def build_memory_context(
     session_history: Sequence[str],
     compact_summary: str = "",
     home: Path | None = None,
+    current_session: SessionScope | None = None,
 ) -> MemoryContext:
     """加载指令记忆并合并当前短期会话历史。
 
@@ -45,10 +50,23 @@ def build_memory_context(
 
     memories = load_instruction_memories(project_root, home=home)
     instruction_context = format_instruction_memories(memories)
+    auto_memory_context = format_auto_memory_index(read_auto_memory_index(project_root))
+    current_session_context = format_current_session_memory(current_session, read_current_session_memory(current_session))
     compact_context = format_compact_summary(compact_summary)
-    notes_context = format_session_notes(read_session_notes(project_root))
+    notes_context = "" if current_session else format_session_notes(read_session_notes(project_root))
     session_context = format_recent_session(session_history)
-    parts = [part for part in [instruction_context, notes_context, compact_context, session_context] if part]
+    parts = [
+        part
+        for part in [
+            instruction_context,
+            auto_memory_context,
+            current_session_context,
+            notes_context,
+            compact_context,
+            session_context,
+        ]
+        if part
+    ]
     return MemoryContext(
         text="\n\n".join(parts),
         instruction_count=len(memories),
@@ -56,6 +74,8 @@ def build_memory_context(
         session_items=len(session_history),
         compact_summary_chars=len(compact_summary),
         session_notes_chars=len(notes_context),
+        auto_memory_chars=len(auto_memory_context),
+        current_session_memory_chars=len(current_session_context),
     )
 
 
@@ -92,11 +112,34 @@ def format_compact_summary(summary: str) -> str:
 
 
 def format_session_notes(notes: str) -> str:
-    """格式化 Session Memory Markdown 内容。"""
+    """格式化当前会话 notes 内容。"""
 
     if not notes.strip():
         return ""
-    return "Session memory notes:\n" + notes.strip()
+    return "Session notes:\n" + notes.strip()
+
+
+def format_auto_memory_index(index: str) -> str:
+    """格式化受控长期记忆索引。"""
+
+    if not index.strip():
+        return ""
+    return "Auto memory index:\n" + index.strip()
+
+
+def format_current_session_memory(scope: SessionScope | None, memory: str) -> str:
+    """格式化当前 session 的会话级记忆。"""
+
+    if scope is None:
+        return ""
+    parts = [
+        "Current session memory:",
+        f"Session ID: {scope.session_id}",
+        f"Path: {scope.session_memory_path}",
+        "",
+        memory.strip() if memory.strip() else "(empty)",
+    ]
+    return "\n".join(parts)
 
 
 def _memory_description(memory: LoadedInstructionMemory) -> str:

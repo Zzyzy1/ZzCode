@@ -40,6 +40,18 @@ def register_builtin_tools(executor: ToolExecutor, project_root: Path) -> None:
         display_name="Write",
     )
     executor.register_tool(
+        "edit_file",
+        "替换项目内文本文件中的一段内容。输入格式: path|||old_text|||new_text，例如 edit_file[README.md|||old|||new]。",
+        lambda tool_input: edit_file(root, tool_input),
+        display_name="Edit",
+    )
+    executor.register_tool(
+        "append_file",
+        "追加内容到项目内文本文件末尾。输入格式: path|||content，例如 append_file[notes.md|||new line]。",
+        lambda tool_input: append_file(root, tool_input),
+        display_name="Append",
+    )
+    executor.register_tool(
         "run_shell",
         "在项目根目录执行简单 shell 命令，带 30 秒超时和危险命令拦截。输入格式: command。",
         lambda tool_input: run_shell(root, tool_input),
@@ -113,6 +125,66 @@ def write_file(project_root: Path, tool_input: str) -> str:
     return f"Wrote {path.relative_to(project_root)} ({len(content)} chars)"
 
 
+def edit_file(project_root: Path, tool_input: str) -> str:
+    """替换项目内文本文件的一段内容。"""
+
+    parts = tool_input.split(WRITE_FILE_SEPARATOR, 2)
+    if len(parts) != 3:
+        return f"参数格式错误。请使用: path{WRITE_FILE_SEPARATOR}old_text{WRITE_FILE_SEPARATOR}new_text"
+
+    path_text, old_text, new_text = parts
+    if not old_text:
+        return "替换失败: old_text 不能为空。"
+
+    path = resolve_project_path(project_root, path_text)
+    if not path.exists():
+        return f"文件不存在: {path.relative_to(project_root)}"
+    if not path.is_file():
+        return f"不是文件: {path.relative_to(project_root)}"
+
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return "文件不是 UTF-8 文本，当前 edit_file 暂不支持。"
+
+    count = content.count(old_text)
+    if count == 0:
+        return "替换失败: old_text 未在文件中找到。"
+    if count > 1:
+        return f"替换失败: old_text 出现 {count} 次，请提供更精确的上下文。"
+
+    updated = content.replace(old_text, new_text, 1)
+    try:
+        path.write_text(updated, encoding="utf-8")
+    except OSError as exc:
+        return f"写入失败: {exc}"
+    return f"Edited {path.relative_to(project_root)} ({len(old_text)} -> {len(new_text)} chars)"
+
+
+def append_file(project_root: Path, tool_input: str) -> str:
+    """追加内容到项目内文本文件末尾。"""
+
+    if WRITE_FILE_SEPARATOR not in tool_input:
+        return f"参数格式错误。请使用: path{WRITE_FILE_SEPARATOR}content"
+
+    path_text, content = tool_input.split(WRITE_FILE_SEPARATOR, 1)
+    path = resolve_project_path(project_root, path_text)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = ""
+        if path.exists():
+            if not path.is_file():
+                return f"不是文件: {path.relative_to(project_root)}"
+            existing = path.read_text(encoding="utf-8")
+        separator = "\n" if existing and not existing.endswith("\n") and content else ""
+        path.write_text(existing + separator + content, encoding="utf-8")
+    except UnicodeDecodeError:
+        return "文件不是 UTF-8 文本，当前 append_file 暂不支持。"
+    except OSError as exc:
+        return f"追加失败: {exc}"
+    return f"Appended {path.relative_to(project_root)} ({len(content)} chars)"
+
+
 def run_shell(project_root: Path, tool_input: str) -> str:
     """在项目根目录执行 shell 命令。
 
@@ -131,8 +203,8 @@ def run_shell(project_root: Path, tool_input: str) -> str:
         capture_output=True,
         timeout=COMMAND_TIMEOUT_SECONDS,
     )
-    output = completed.stdout.strip()
-    error = completed.stderr.strip()
+    output = (completed.stdout or "").strip()
+    error = (completed.stderr or "").strip()
     parts = []
     if output:
         parts.append(output)
