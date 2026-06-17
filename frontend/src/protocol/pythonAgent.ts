@@ -56,7 +56,6 @@ class PythonAgentSession {
   private child: ChildProcessWithoutNullStreams;
   private queue = new EventQueue();
   private stderr = "";
-  private stderrLineBuffer = "";
   closed = false;
 
   constructor() {
@@ -121,7 +120,9 @@ class PythonAgentSession {
     this.child.stderr.setEncoding("utf8");
     this.child.stderr.on("data", (chunk) => {
       this.stderr += chunk;
-      this.handleStderrChunk(chunk);
+      if (process.env.ZZCODE_DEBUG_TO_STDERR === "1") {
+        process.stderr.write(chunk);
+      }
     });
 
     const lines = createInterface({
@@ -154,21 +155,6 @@ class PythonAgentSession {
     });
   }
 
-  private handleStderrChunk(chunk: string): void {
-    this.stderrLineBuffer += chunk;
-    const lines = this.stderrLineBuffer.split(/\r?\n/);
-    this.stderrLineBuffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      if (line.startsWith("[zzcode memory] ")) {
-        this.queue.push({
-          type: "system_notice",
-          level: "info",
-          text: line.slice("[zzcode memory] ".length)
-        });
-      }
-    }
-  }
 }
 
 async function requestPermission(event: PermissionRequestEvent, options: RequestOptions): Promise<PermissionDecision> {

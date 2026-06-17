@@ -1,5 +1,5 @@
 """Agent implementations for ZzCode."""
 
-from .react_text import TextReActAgent
+from .tool_call_agent import ToolCallAgent
 
-__all__ = ["TextReActAgent"]
+__all__ = ["ToolCallAgent"]

@@ -4,11 +4,36 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
+
+from zzcode.logging import log_debug, log_error
+
+
+@dataclass(frozen=True)
+class LLMToolCall:
+    """模型返回的标准化工具调用。
+
+    id 对应 provider 的 tool_call_id；arguments 是解析后的 JSON object。
+    """
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+    raw: dict[str, Any] = field(default_factory=dict)
+    parse_error: str | None = None
+
+
+@dataclass(frozen=True)
+class LLMResponse:
+    """模型响应的标准化结果。"""
+
+    content: str
+    tool_calls: list[LLMToolCall] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
 
 
 class ThinkClient(Protocol):
@@ -20,6 +45,18 @@ class ThinkClient(Protocol):
         messages 是 OpenAI-compatible 消息列表；temperature 控制随机性；
         返回模型文本，失败时返回 None。
         """
+
+
+class ChatClient(Protocol):
+    """结构化 tool call Agent 依赖的模型协议。"""
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0,
+    ) -> LLMResponse | None:
+        """请求模型生成 assistant message。"""
 
 
 class ZzCodeLLM:
@@ -51,13 +88,28 @@ class ZzCodeLLM:
             )
 
     def think(self, messages: list[dict[str, str]], temperature: float = 0) -> str | None:
-        """调用 Chat Completions 接口。
+        """调用 Chat Completions 接口并返回纯文本。
 
         messages 是模型上下文；temperature 传给模型服务；
         返回 assistant 文本，HTTP 或网络失败时返回 None。
         """
 
-        print(f"Calling model: {self.model}", file=sys.stderr)
+        response = self.chat(messages, temperature=temperature)
+        return response.content if response is not None else None
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0,
+    ) -> LLMResponse | None:
+        """调用 Chat Completions 接口并标准化 tool_calls。
+
+        messages 是模型上下文；tools 是 OpenAI-compatible tools schema；
+        返回标准化 LLMResponse，HTTP 或网络失败时返回 None。
+        """
+
+        log_debug(f"Calling model: {self.model}", level="info", component="llm")
         try:
             # 这里直接使用标准库 HTTP，避免第一阶段依赖 openai SDK。
             payload = {
@@ -66,6 +118,8 @@ class ZzCodeLLM:
                 "temperature": temperature,
                 "stream": False,
             }
+            if tools is not None:
+                payload["tools"] = tools
             request = urllib.request.Request(
                 url=self._chat_completions_url(),
                 data=json.dumps(payload).encode("utf-8"),
@@ -77,15 +131,21 @@ class ZzCodeLLM:
             )
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 body = json.loads(response.read().decode("utf-8"))
-            content = body["choices"][0]["message"].get("content") or ""
-            print(content, file=sys.stderr)
-            return content
+            llm_response = normalize_chat_response(body)
+            content = llm_response.content
+            if content:
+                log_debug(content, level="debug", component="llm")
+            return llm_response
         except urllib.error.HTTPError as exc:  # pragma: no cover - depends on remote provider
             error_body = exc.read().decode("utf-8", errors="replace")
-            print(f"LLM HTTP error {exc.code}: {error_body}", file=sys.stderr)
+            log_error(
+                exc,
+                component="llm",
+                context={"status_code": exc.code, "response_body": error_body},
+            )
             return None
         except Exception as exc:  # pragma: no cover - depends on remote provider
-            print(f"LLM call failed: {exc}", file=sys.stderr)
+            log_error(exc, component="llm", context={"phase": "chat"})
             return None
 
     def _chat_completions_url(self) -> str:
@@ -98,6 +158,57 @@ class ZzCodeLLM:
         if base.endswith("/chat/completions"):
             return base
         return f"{base}/chat/completions"
+
+
+def normalize_chat_response(body: dict[str, Any]) -> LLMResponse:
+    """把 OpenAI-compatible 响应标准化为 LLMResponse。"""
+
+    message = body["choices"][0].get("message") or {}
+    content = message.get("content") or ""
+    tool_calls = _normalize_tool_calls(message)
+    return LLMResponse(content=content, tool_calls=tool_calls, raw=body)
+
+
+def _normalize_tool_calls(message: dict[str, Any]) -> list[LLMToolCall]:
+    calls = message.get("tool_calls") or []
+    if not calls and message.get("function_call"):
+        calls = [{"id": "call_0", "type": "function", "function": message["function_call"]}]
+
+    normalized: list[LLMToolCall] = []
+    for index, raw_call in enumerate(calls):
+        if not isinstance(raw_call, dict):
+            continue
+        function = raw_call.get("function") if isinstance(raw_call.get("function"), dict) else {}
+        name = str(function.get("name") or raw_call.get("name") or "")
+        if not name:
+            continue
+        arguments, parse_error = _parse_tool_arguments(function.get("arguments", {}))
+        normalized.append(
+            LLMToolCall(
+                id=str(raw_call.get("id") or f"call_{index}"),
+                name=name,
+                arguments=arguments,
+                raw=raw_call,
+                parse_error=parse_error,
+            )
+        )
+    return normalized
+
+
+def _parse_tool_arguments(value: Any) -> tuple[dict[str, Any], str | None]:
+    if isinstance(value, dict):
+        return value, None
+    if value in (None, ""):
+        return {}, None
+    if not isinstance(value, str):
+        return {}, f"Tool arguments must be JSON object string, got {type(value).__name__}."
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        return {}, f"Tool arguments JSON parse failed: {exc}"
+    if not isinstance(parsed, dict):
+        return {}, f"Tool arguments must decode to JSON object, got {type(parsed).__name__}."
+    return parsed, None
 
 
 def load_env_file(path: str | os.PathLike[str] = ".env") -> None:

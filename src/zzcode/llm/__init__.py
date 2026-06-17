@@ -1,5 +1,5 @@
 """LLM clients for ZzCode."""
 
-from .client import ZzCodeLLM
+from .client import ChatClient, LLMResponse, LLMToolCall, ThinkClient, ZzCodeLLM
 
-__all__ = ["ZzCodeLLM"]
+__all__ = ["ChatClient", "LLMResponse", "LLMToolCall", "ThinkClient", "ZzCodeLLM"]

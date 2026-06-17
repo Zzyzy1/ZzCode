@@ -10,12 +10,20 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable, TextIO
 
-from zzcode.agent.react_text import TextReActAgent
-from zzcode.cli.main import build_tools
+from zzcode.agent.tool_call_agent import ToolCallAgent
+from zzcode.cli.main import build_tool_registry, create_mcp_manager
 from zzcode.llm.client import ZzCodeLLM
+from zzcode.logging import (
+    configure_logging_context,
+    flush_debug_logs,
+    get_current_debug_log_path,
+    log_debug,
+    log_error,
+)
 from zzcode.memory import ShortTermSessionMemory, TranscriptRecorder, build_memory_context, create_session_scope
 from zzcode.protocol.events import JsonLineEventWriter, JsonLineRenderer
 from zzcode.subagents import SystemAgentScheduler, SystemAgentSchedulerResult
+from zzcode.tools.base import ToolPermissionRequest, ToolPermissionResult
 from zzcode.tools.builtin import WRITE_FILE_SEPARATOR
 from zzcode.tools.safety import resolve_project_path
 
@@ -36,14 +44,33 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     writer = JsonLineEventWriter()
+    project_root = Path(os.getenv("ZZCODE_PROJECT_ROOT") or Path.cwd()).resolve()
+    configure_logging_context(project_root=project_root)
+
+    session_scope = create_session_scope(project_root)
+    configure_logging_context(session_id=session_scope.session_id, project_root=project_root)
+    log_debug(
+        "server bootstrap "
+        f"project_root={project_root} "
+        f"session_id={session_scope.session_id} "
+        f"debug_log={get_current_debug_log_path()}",
+        level="info",
+        component="protocol",
+    )
+
     try:
         llm = ZzCodeLLM(stream=False)
     except Exception as exc:
+        log_error(exc, component="llm", context={"phase": "initialize"})
         writer.write({"type": "system_notice", "level": "error", "text": f"LLM 初始化失败: {exc}"})
         return 1
 
-    project_root = Path(os.getenv("ZZCODE_PROJECT_ROOT") or Path.cwd()).resolve()
-    session_scope = create_session_scope(project_root)
+    mcp_manager = create_mcp_manager(
+        project_root,
+        reporter=lambda level, message: writer.write(
+            {"type": "system_notice", "level": level, "text": message}
+        ),
+    )
     transcript = TranscriptRecorder(session_scope)
     _debug_memory(
         "server started "
@@ -59,26 +86,17 @@ def main(argv: list[str] | None = None) -> int:
         parent_scope=session_scope,
         llm_client=llm,
     )
-    tools = build_tools(
-        project_root,
-        llm_client=llm,
-        session_scope=session_scope,
-        permission_checker=permission_bridge.request_permission,
-        session_context_provider=lambda: build_memory_context(
-            project_root,
-            session_memory.as_list(),
-            compact_summary=session_memory.compact_summary(),
-            current_session=session_scope,
-        ).text,
-    )
+    tools = build_tool_registry(project_root, mcp_manager=mcp_manager)
     renderer = JsonLineRenderer(writer)
-    agent = TextReActAgent(
+    agent = ToolCallAgent(
         llm_client=llm,
-        tool_executor=tools,
+        tool_registry=tools,
+        project_root=project_root,
         max_steps=5,
         renderer=renderer,
-        permission_checker=permission_bridge.request_permission,
+        permission_checker=permission_bridge.request_structured_permission,
         transcript_sink=transcript,
+        session_id=session_scope.session_id,
     )
 
     for request in _read_requests(sys.stdin):
@@ -86,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         if request_type == "clear_history":
             _debug_memory(f"clear history previous_items={len(session_memory)}")
             session_memory.clear()
-            agent.history = []
+            agent.messages = []
             writer.write({"type": "system_notice", "level": "info", "text": "会话历史已清空。"})
             writer.write({"type": "request_done", "ok": True})
             continue
@@ -208,6 +226,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.once:
             break
 
+    if mcp_manager is not None:
+        mcp_manager.close_all()
+    flush_debug_logs()
     return 0
 
 
@@ -246,15 +267,15 @@ def _extract_user_text(request: dict[str, Any]) -> str:
 
 
 def _debug_memory(message: str) -> None:
-    """输出记忆调试日志到 stderr，避免破坏 stdout JSONL 协议。"""
+    """输出记忆调试日志。"""
 
     if os.getenv("ZZCODE_DEBUG_MEMORY", "1").lower() in {"0", "false", "no"}:
         return
-    print(f"[zzcode memory] {message}", file=sys.stderr, flush=True)
+    log_debug(message, level="debug", component="memory")
 
 
 def _debug_system_agents(label: str, result: SystemAgentSchedulerResult) -> None:
-    """输出系统子 Agent 调度结果到 stderr。"""
+    """输出系统子 Agent 调度结果。"""
 
     session = result.session_memory
     auto = result.auto_memory
@@ -271,7 +292,7 @@ def _debug_system_agents(label: str, result: SystemAgentSchedulerResult) -> None
         )
     if result.errors:
         parts.append("errors=" + " | ".join(result.errors))
-    _debug_memory("system agents " + " ".join(parts))
+    log_debug(" ".join(parts), level="debug", component="system-agents")
 
 
 def _compact_debug_text(text: str, max_length: int = 160) -> str:
@@ -297,15 +318,30 @@ class PermissionBridge:
         self._session_allowed_tools: set[str] = set()
 
     def request_permission(self, tool_name: str, tool_input: str, display_name: str | None = None) -> bool:
-        """请求一次工具执行权限。
+        """请求一次 legacy 文本工具执行权限。
 
         tool_name/tool_input 描述即将执行的工具；display_name 是 UI 展示名；返回是否允许执行。
         """
 
-        if _is_auto_allowed_memory_tool(tool_name, tool_input, self.session_id):
-            return True
-        if tool_name in self._session_allowed_tools:
-            return True
+        result = self.request_structured_permission(
+            ToolPermissionRequest(
+                tool_call_id="",
+                tool_name=tool_name,
+                display_name=display_name or tool_name,
+                args=_legacy_tool_input_to_args(tool_name, tool_input),
+                summary=tool_input,
+                is_destructive=_classify_tool_risk(tool_name) != "low",
+            )
+        )
+        return result.behavior == "allow"
+
+    def request_structured_permission(self, request: ToolPermissionRequest) -> ToolPermissionResult:
+        """请求一次结构化工具执行权限。"""
+
+        if _is_auto_allowed_memory_tool(request.tool_name, request.args, self.session_id):
+            return ToolPermissionResult.allow(reason="auto_allowed_memory_tool")
+        if request.tool_name in self._session_allowed_tools:
+            return ToolPermissionResult.allow(reason="session_allowed")
 
         self._index += 1
         request_id = f"permission-{self._index}"
@@ -313,11 +349,16 @@ class PermissionBridge:
             {
                 "type": "permission_request",
                 "id": request_id,
-                "toolName": tool_name,
-                "displayName": display_name,
-                "input": tool_input,
-                "risk": _classify_tool_risk(tool_name),
-                "preview": _build_permission_preview(tool_name, tool_input),
+                "toolCallId": request.tool_call_id,
+                "toolName": request.tool_name,
+                "displayName": request.display_name,
+                "input": request.args,
+                "summary": request.summary,
+                "isDestructive": request.is_destructive,
+                "risk": _classify_tool_risk(request.tool_name),
+                "preview": _build_permission_preview(request.tool_name, request.args),
+                "source": request.source,
+                "mcpInfo": request.mcp_info,
             }
         )
 
@@ -332,11 +373,13 @@ class PermissionBridge:
 
             decision = response.get("decision")
             if decision == "allow_session":
-                self._session_allowed_tools.add(tool_name)
-                return True
-            return decision == "allow_once"
+                self._session_allowed_tools.add(request.tool_name)
+                return ToolPermissionResult.allow(reason="allow_session")
+            if decision == "allow_once":
+                return ToolPermissionResult.allow(reason="allow_once")
+            return ToolPermissionResult.deny("Tool execution denied by user.", reason="user_denied")
 
-        return False
+        return ToolPermissionResult.deny("Permission response stream ended.", reason="permission_stream_ended")
 
 
 def _classify_tool_risk(tool_name: str) -> str:
@@ -349,25 +392,42 @@ def _classify_tool_risk(tool_name: str) -> str:
         return "high"
     if tool_name in {"write_file", "edit_file", "append_file"}:
         return "medium"
+    if _is_mcp_tool_name(tool_name):
+        return "medium"
     return "low"
 
 
-def _build_permission_preview(tool_name: str, tool_input: str) -> dict[str, Any] | None:
+def _is_mcp_tool_name(tool_name: str) -> bool:
+    return tool_name.startswith("mcp__")
+
+
+def _mcp_info_from_tool_name(tool_name: str) -> dict[str, str] | None:
+    if not _is_mcp_tool_name(tool_name):
+        return None
+    remainder = tool_name[len("mcp__") :]
+    server_name, separator, short_name = remainder.partition("__")
+    if separator != "__" or not server_name or not short_name:
+        return None
+    return {"server_name": server_name, "tool_name": short_name}
+
+
+def _build_permission_preview(tool_name: str, tool_input: object) -> dict[str, Any] | None:
     """为权限确认生成轻量预览。
 
     tool_name/tool_input 描述待执行工具；返回前端可渲染的预览对象，普通工具返回 None。
     """
 
+    legacy_input = _tool_input_to_legacy_text(tool_name, tool_input)
     if tool_name == "write_file":
-        return _build_write_file_diff_preview(tool_input)
+        return _build_write_file_diff_preview(legacy_input)
     if tool_name == "edit_file":
-        return _build_edit_file_diff_preview(tool_input)
+        return _build_edit_file_diff_preview(legacy_input)
     if tool_name == "append_file":
-        return _build_append_file_diff_preview(tool_input)
+        return _build_append_file_diff_preview(legacy_input)
     return None
 
 
-def _is_auto_allowed_memory_tool(tool_name: str, tool_input: str, session_id: str | None = None) -> bool:
+def _is_auto_allowed_memory_tool(tool_name: str, tool_input: object, session_id: str | None = None) -> bool:
     """判断普通文件工具是否只访问 Auto Memory markdown。"""
 
     if tool_name not in {"read_file", "write_file", "edit_file", "append_file"}:
@@ -402,14 +462,58 @@ def _path_is_under(path: Path, parent: Path) -> bool:
     return True
 
 
-def _extract_file_tool_path(tool_name: str, tool_input: str) -> str:
+def _extract_file_tool_path(tool_name: str, tool_input: object) -> str:
     """从普通文件工具参数中提取路径部分。"""
 
+    if isinstance(tool_input, dict):
+        path = tool_input.get("path")
+        return path.strip() if isinstance(path, str) else ""
+    if not isinstance(tool_input, str):
+        return ""
     if tool_name == "read_file":
         return tool_input.strip()
     if tool_name in {"write_file", "edit_file", "append_file"}:
         return tool_input.split(WRITE_FILE_SEPARATOR, 1)[0].strip()
     return ""
+
+
+def _legacy_tool_input_to_args(tool_name: str, tool_input: str) -> dict[str, Any]:
+    """把旧文本工具参数转换成结构化权限参数。"""
+
+    if tool_name == "read_file":
+        return {"path": tool_input}
+    if tool_name in {"write_file", "append_file"} and WRITE_FILE_SEPARATOR in tool_input:
+        path, content = tool_input.split(WRITE_FILE_SEPARATOR, 1)
+        return {"path": path, "content": content}
+    if tool_name == "edit_file":
+        parts = tool_input.split(WRITE_FILE_SEPARATOR, 2)
+        if len(parts) == 3:
+            return {"path": parts[0], "old_text": parts[1], "new_text": parts[2]}
+    if tool_name == "run_shell":
+        return {"command": tool_input}
+    return {"input": tool_input}
+
+
+def _tool_input_to_legacy_text(tool_name: str, tool_input: object) -> str:
+    """把结构化工具参数转换成旧 diff 预览可复用的文本格式。"""
+
+    if isinstance(tool_input, str):
+        return tool_input
+    if not isinstance(tool_input, dict):
+        return str(tool_input)
+    if tool_name == "read_file":
+        return str(tool_input.get("path") or "")
+    if tool_name in {"write_file", "append_file"}:
+        return f"{tool_input.get('path') or ''}{WRITE_FILE_SEPARATOR}{tool_input.get('content') or ''}"
+    if tool_name == "edit_file":
+        return (
+            f"{tool_input.get('path') or ''}{WRITE_FILE_SEPARATOR}"
+            f"{tool_input.get('old_text') or ''}{WRITE_FILE_SEPARATOR}"
+            f"{tool_input.get('new_text') or ''}"
+        )
+    if tool_name == "run_shell":
+        return str(tool_input.get("command") or "")
+    return json.dumps(tool_input, ensure_ascii=False)
 
 
 def _project_root() -> Path:

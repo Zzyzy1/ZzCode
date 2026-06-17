@@ -1,19 +1,17 @@
-"""Interactive CLI for the first text ReAct demo."""
+"""Interactive CLI for the structured tool-call agent."""
 
 from __future__ import annotations
 
-import ast
-import operator
 from pathlib import Path
 from typing import Callable
 
-from zzcode.agent.react_text import TextReActAgent
+from zzcode.agent.tool_call_agent import ToolCallAgent
 from zzcode.cli.ui import create_ui
-from zzcode.llm.client import ThinkClient, ZzCodeLLM
-from zzcode.memory.session_scope import SessionScope
-from zzcode.subagents.tool import register_agent_tool
-from zzcode.tools.builtin import register_builtin_tools
-from zzcode.tools.executor import ToolExecutor
+from zzcode.llm.client import ZzCodeLLM
+from zzcode.mcp import McpConfigError, McpManager
+from zzcode.tools.base import ToolPermissionRequest, ToolPermissionResult
+from zzcode.tools.builtin import build_tool_registry as build_structured_tool_registry
+from zzcode.tools.registry import ToolRegistry
 
 
 def main() -> int:
@@ -30,124 +28,94 @@ def main() -> int:
         return 1
 
     project_root = Path.cwd()
-    tools = build_tools(project_root)
-    ui.banner(model=llm.model or "(unknown)", tools=tools)
-    agent = TextReActAgent(llm_client=llm, tool_executor=tools, max_steps=5, renderer=ui)
-
-    ui.info("输入 /help 查看命令，输入 /exit 退出。")
-    while True:
-        try:
-            user_input = ui.prompt().strip()
-        except (EOFError, KeyboardInterrupt):
-            ui.goodbye()
-            return 0
-
-        if not user_input:
-            continue
-
-        # 斜杠命令由 CLI 自己处理，普通输入才交给 Agent。
-        command = user_input.lower()
-        if command in {"/exit", "/quit", "exit", "quit"}:
-            ui.goodbye()
-            return 0
-        if command == "/help":
-            ui.help(tools)
-            continue
-        if command == "/clear":
-            agent.history = []
-            ui.info("history cleared")
-            continue
-
-        agent.run(user_input)
-
-
-def build_tools(
-    project_root: Path,
-    *,
-    llm_client: ThinkClient | None = None,
-    session_scope: SessionScope | None = None,
-    permission_checker: Callable[[str, str, str | None], bool] | None = None,
-    session_context_provider: Callable[[], str] | None = None,
-) -> ToolExecutor:
-    """创建本次会话可用的工具集合。
-
-    project_root 表示工具操作的项目根目录；返回已注册内置工具的 ToolExecutor。
-    """
-
-    tools = ToolExecutor()
-    register_builtin_tools(tools, project_root)
-
-    # Calculator 暂时保留为教学/调试工具，方便验证 ReAct 链路不依赖文件系统。
-    tools.register_tool(
-        "Calculator",
-        "计算简单四则运算表达式，例如 Calculator[1+2*3]。",
-        calculate,
-        display_name="Calculator",
+    mcp_manager = create_mcp_manager(
+        project_root,
+        reporter=lambda level, message: getattr(ui, level)(message),
     )
-    if llm_client is not None and session_scope is not None:
-        register_agent_tool(
-            tools,
-            project_root=project_root,
-            llm_client=llm_client,
-            session_scope=session_scope,
-            permission_checker=permission_checker,
-            session_context_provider=session_context_provider,
-        )
-    return tools
-
-
-def calculate(expression: str) -> str:
-    """计算教学用四则运算表达式。
-
-    expression 是模型传入的算式字符串；返回计算结果或错误文本。
-    """
+    tools = build_tool_registry(project_root, mcp_manager=mcp_manager)
+    ui.banner(model=llm.model or "(unknown)", tools=tools)
+    agent = ToolCallAgent(
+        llm_client=llm,
+        tool_registry=tools,
+        project_root=project_root,
+        max_steps=5,
+        renderer=ui,
+        permission_checker=_request_cli_permission,
+    )
 
     try:
-        result = safe_eval_arithmetic(expression)
-    except Exception as exc:
-        return f"计算失败: {exc}"
-    return str(result)
+        ui.info("输入 /help 查看命令，输入 /exit 退出。")
+        while True:
+            try:
+                user_input = ui.prompt().strip()
+            except (EOFError, KeyboardInterrupt):
+                ui.goodbye()
+                return 0
+
+            if not user_input:
+                continue
+
+            # 斜杠命令由 CLI 自己处理，普通输入才交给 Agent。
+            command = user_input.lower()
+            if command in {"/exit", "/quit", "exit", "quit"}:
+                ui.goodbye()
+                return 0
+            if command == "/help":
+                ui.help(tools)
+                continue
+            if command == "/clear":
+                agent.messages = []
+                ui.info("history cleared")
+                continue
+
+            agent.run(user_input)
+    finally:
+        if mcp_manager is not None:
+            mcp_manager.close_all()
 
 
-def safe_eval_arithmetic(expression: str) -> int | float:
-    """安全计算简单算术表达式。
+def build_tool_registry(
+    project_root: Path | None = None,
+    mcp_manager: McpManager | None = None,
+) -> ToolRegistry:
+    """创建结构化工具集合。"""
 
-    expression 只允许数字和基础运算符；返回 int 或 float。
-    """
-
-    node = ast.parse(expression, mode="eval")
-    return _eval_node(node.body)
-
-
-def _eval_node(node: ast.AST) -> int | float:
-    """递归求值 AST 节点。
-
-    node 是表达式 AST；返回该节点的数值结果，不支持的语法会抛 ValueError。
-    """
-
-    binary_ops = {
-        ast.Add: operator.add,
-        ast.Sub: operator.sub,
-        ast.Mult: operator.mul,
-        ast.Div: operator.truediv,
-        ast.FloorDiv: operator.floordiv,
-        ast.Mod: operator.mod,
-        ast.Pow: operator.pow,
-    }
-    unary_ops = {
-        ast.UAdd: operator.pos,
-        ast.USub: operator.neg,
-    }
-
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-        return node.value
-    # 只允许白名单中的 AST 节点，避免 eval 执行任意 Python 代码。
-    if isinstance(node, ast.BinOp) and type(node.op) in binary_ops:
-        return binary_ops[type(node.op)](_eval_node(node.left), _eval_node(node.right))
-    if isinstance(node, ast.UnaryOp) and type(node.op) in unary_ops:
-        return unary_ops[type(node.op)](_eval_node(node.operand))
-    raise ValueError("只支持数字和简单四则运算。")
+    return build_structured_tool_registry(project_root, mcp_manager=mcp_manager)
 
 
+def create_mcp_manager(
+    project_root: Path,
+    reporter: Callable[[str, str], None] | None = None,
+) -> McpManager | None:
+    """按项目配置创建并连接 MCP manager。"""
+
+    try:
+        manager = McpManager(project_root)
+    except McpConfigError as exc:
+        if reporter is not None:
+            reporter("error", f"MCP config error: {exc}")
+        return None
+
+    if not manager.config.servers:
+        return None
+
+    connected = manager.connect_all()
+    failed = [status for status in manager.statuses() if status.status == "failed"]
+    if reporter is not None:
+        if connected:
+            reporter("info", f"MCP connected: {', '.join(connection.name for connection in connected)}")
+        for status in failed:
+            reporter("error", f"MCP server failed: {status.name}: {status.error}")
+    return manager
+
+
+def _request_cli_permission(request: ToolPermissionRequest) -> ToolPermissionResult:
+    """在终端请求结构化工具权限。"""
+
+    print(f"Permission required: {request.display_name} - {request.summary}")
+    answer = input("Allow once? [y/N] ").strip().lower()
+    if answer in {"y", "yes"}:
+        return ToolPermissionResult.allow(reason="cli_allow_once")
+    return ToolPermissionResult.deny("Tool execution denied by user.", reason="cli_denied")
 if __name__ == "__main__":
     raise SystemExit(main())
