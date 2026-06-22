@@ -24,8 +24,10 @@ export type ToolUseEvent = {
   type: "tool_use";
   id: string;
   name: string;
-  input: string;
+  input: unknown;
   displayName?: string;
+  source?: string;
+  mcpInfo?: McpInfo | null;
 };
 
 export type ToolResultEvent = {
@@ -34,6 +36,8 @@ export type ToolResultEvent = {
   name: string;
   output: string;
   ok: boolean;
+  source?: string;
+  mcpInfo?: McpInfo | null;
 };
 
 export type AssistantFinalEvent = {
@@ -57,11 +61,21 @@ export type PermissionRisk = "low" | "medium" | "high";
 export type PermissionRequestEvent = {
   type: "permission_request";
   id: string;
+  toolCallId?: string;
   toolName: string;
   displayName?: string;
-  input: string;
+  input: unknown;
+  summary?: string;
+  isDestructive?: boolean;
   risk: PermissionRisk;
   preview?: PermissionPreview | null;
+  source?: string;
+  mcpInfo?: McpInfo | null;
+};
+
+export type McpInfo = {
+  server_name?: string;
+  tool_name?: string;
 };
 
 export type PermissionDecision = "allow_once" | "allow_session" | "deny";

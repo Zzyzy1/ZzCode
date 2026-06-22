@@ -35,7 +35,7 @@ from zzcode.memory import (
     truncate_session_memory_for_compact,
 )
 from zzcode.agent.react_text import REACT_PROMPT_TEMPLATE
-from zzcode.cli.main import build_tools
+from zzcode.legacy import build_legacy_tools
 from zzcode.protocol.server import _is_auto_allowed_memory_tool
 from zzcode.tools.builtin import append_file, edit_file, read_file, write_file
 
@@ -715,7 +715,7 @@ def test_build_tools_hides_dedicated_memory_tools(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
 
-    tools = build_tools(project_root)
+    tools = build_legacy_tools(project_root)
 
     assert "memory_save" not in tools.tool_names_text()
     assert "memory_read" not in tools.tool_names_text()

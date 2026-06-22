@@ -69,7 +69,7 @@ class JsonLineRenderer:
         if isinstance(message, AssistantThought):
             return {"type": "assistant_thought", "text": message.text}
         if isinstance(message, ToolUse):
-            tool_id = self._next_tool_id(message.name)
+            tool_id = message.id or self._next_tool_id(message.name)
             self._last_tool_id_by_name[message.name] = tool_id
             return {
                 "type": "tool_use",
@@ -77,14 +77,18 @@ class JsonLineRenderer:
                 "name": message.name,
                 "displayName": message.display_name,
                 "input": message.tool_input,
+                "source": message.source,
+                "mcpInfo": message.mcp_info,
             }
         if isinstance(message, ToolResult):
             return {
                 "type": "tool_result",
-                "id": self._last_tool_id_by_name.get(message.tool_name, message.tool_name),
+                "id": message.id or self._last_tool_id_by_name.get(message.tool_name, message.tool_name),
                 "name": message.tool_name,
-                "ok": not _looks_like_error(message.output),
+                "ok": message.ok if message.ok is not None else not _looks_like_error(message.output),
                 "output": message.output,
+                "source": message.source,
+                "mcpInfo": message.mcp_info,
             }
         if isinstance(message, FinalAnswer):
             return {"type": "assistant_final", "text": message.text}

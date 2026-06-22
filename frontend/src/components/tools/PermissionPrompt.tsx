@@ -51,13 +51,15 @@ export function PermissionPrompt({ request, onDecision }: Props) {
   });
 
   const color = request.risk === "high" ? defaultTheme.danger : request.risk === "medium" ? defaultTheme.warning : defaultTheme.success;
+  const toolLabel = request.source === "mcp" ? request.toolName : request.displayName ?? request.toolName;
 
   return (
     <Box borderStyle="single" borderColor={color} paddingX={1} marginTop={1} flexDirection="column">
       <Text color={color}>Tool permission required</Text>
       <Text>
-        <Text bold>{request.displayName ?? request.toolName}</Text>
-        <Text color={defaultTheme.muted}>({request.input})</Text>
+        <Text bold>{toolLabel}</Text>
+        {request.source === "mcp" && request.displayName ? <Text color={defaultTheme.muted}> [{request.displayName}]</Text> : null}
+        <Text color={defaultTheme.muted}>({formatInput(request.input)})</Text>
       </Text>
       <Text color={defaultTheme.muted}>risk: {request.risk} · ↑/↓ select · Enter confirm</Text>
       {request.preview?.type === "write_file_diff" ? <DiffPreview preview={request.preview} /> : null}
@@ -75,4 +77,15 @@ export function PermissionPrompt({ request, onDecision }: Props) {
       </Box>
     </Box>
   );
+}
+
+function formatInput(input: unknown): string {
+  if (typeof input === "string") {
+    return input;
+  }
+  try {
+    return JSON.stringify(input);
+  } catch {
+    return String(input);
+  }
 }

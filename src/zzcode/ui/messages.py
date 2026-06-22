@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 
 @dataclass(frozen=True)
@@ -26,8 +26,11 @@ class ToolUse:
     """模型请求调用工具时的 UI 消息。"""
 
     name: str
-    tool_input: str
+    tool_input: Any
     display_name: str | None = None
+    id: str | None = None
+    source: str = "local"
+    mcp_info: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,10 @@ class ToolResult:
 
     tool_name: str
     output: str
+    id: str | None = None
+    ok: bool | None = None
+    source: str = "local"
+    mcp_info: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from zzcode.agent.react_text import TextReActAgent
-from zzcode.cli.main import build_tools
+from zzcode.legacy import build_legacy_tools
 from zzcode.memory import TranscriptRecorder, create_session_scope
 from zzcode.subagents import (
     AutoMemoryExtractionWorker,
@@ -819,7 +819,7 @@ class AgentToolTest(unittest.TestCase):
             project_root = Path(tmp)
             session_scope = create_session_scope(project_root, "main-session")
             llm = FakeThinkClient(["Thought: 直接回答\nAction: Finish[子任务完成]"])
-            tools = build_tools(
+            tools = build_legacy_tools(
                 project_root,
                 llm_client=llm,
                 session_scope=session_scope,
@@ -837,7 +837,7 @@ class AgentToolTest(unittest.TestCase):
 
     def test_build_tools_without_subagent_dependencies_keeps_agent_tool_hidden(self) -> None:
         with TemporaryDirectory() as tmp:
-            tools = build_tools(Path(tmp))
+            tools = build_legacy_tools(Path(tmp))
 
         self.assertIsNone(tools.get_registered_tool("agent"))
 

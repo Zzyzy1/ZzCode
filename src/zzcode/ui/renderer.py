@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Protocol
 
 from .messages import (
@@ -41,7 +42,7 @@ class PlainInlineRenderer:
             print(f"● Thought\n  {message.text}")
         elif isinstance(message, ToolUse):
             label = message.display_name or message.name
-            print(f"● {label}({message.tool_input})")
+            print(f"● {label}({_format_tool_input(message.tool_input)})")
         elif isinstance(message, ToolResult):
             print(f"  ⎿ {message.output}")
         elif isinstance(message, FinalAnswer):
@@ -97,7 +98,7 @@ class RichInlineRenderer:
         label = message.display_name or message.name
         # 模型输出可能包含 [] 等 Rich markup 字符，必须转义后再渲染。
         self.console.print(
-            f"[bold yellow]● {escape(label)}[/bold yellow]([dim]{escape(message.tool_input)}[/dim])"
+            f"[bold yellow]● {escape(label)}[/bold yellow]([dim]{escape(_format_tool_input(message.tool_input))}[/dim])"
         )
 
     def _tool_result(self, message: ToolResult) -> None:
@@ -121,3 +122,9 @@ class RichInlineRenderer:
         }[message.level]
         self.console.print(f"[bold {color}]● {message.level.title()}[/bold {color}]")
         self.console.print(f"[dim]  ⎿[/dim] {escape(message.text)}")
+
+
+def _format_tool_input(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)

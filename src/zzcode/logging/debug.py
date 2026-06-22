@@ -5,12 +5,13 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from .paths import get_debug_log_path, get_latest_debug_log_path
+from .paths import get_debug_log_path, get_latest_debug_log_path, resolve_log_override
 from .process import write_to_stderr
 from .writer import BufferedFileWriter
 
@@ -99,7 +100,7 @@ def get_current_debug_log_path() -> Path:
 
     override = os.getenv("ZZCODE_DEBUG_FILE")
     if override:
-        return Path(override).expanduser().resolve()
+        return resolve_log_override(override)
     return get_debug_log_path(_context.session_id)
 
 
@@ -119,8 +120,10 @@ def log_debug(message: str, *, level: DebugLogLevel = "debug", component: str | 
         return
 
     normalized = _normalize_debug_message(message)
-    prefix = f"[{component}] " if component else ""
-    line = f"{datetime.now().isoformat()} [{level.upper()}] {prefix}{normalized}\n"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    level_text = level.upper().ljust(5)
+    component_text = (component or "-")[:14].ljust(14)
+    line = f"{timestamp} | {level_text} | {component_text} | {normalized}\n"
     writer = _get_writer()
     writer.write(line)
     if is_debug_to_stderr():
@@ -129,9 +132,14 @@ def log_debug(message: str, *, level: DebugLogLevel = "debug", component: str | 
 
 def _normalize_debug_message(message: str) -> str:
     stripped = message.strip()
-    if "\n" not in stripped:
-        return stripped
-    return json.dumps(stripped, ensure_ascii=False)
+    if not stripped:
+        return "-"
+    if "\n" in stripped:
+        stripped = json.dumps(stripped, ensure_ascii=False)
+    compacted = re.sub(r"\s+", " ", stripped).strip()
+    if len(compacted) <= 240:
+        return compacted
+    return f"{compacted[:237]}..."
 
 
 def _get_writer() -> BufferedFileWriter:

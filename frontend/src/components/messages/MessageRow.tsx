@@ -3,9 +3,12 @@ import { Box, Text } from "ink";
 import type { MessageNode } from "../../protocol/events.js";
 import { defaultTheme } from "../../app/theme.js";
 import { ToolBlock } from "../tools/ToolBlock.js";
+import { MarkdownMessage } from "./MarkdownMessage.js";
+import { formatToolUseSummary } from "../tools/toolUiRegistry.js";
+import { CollapsedToolGroup, type CollapsedToolGroupNode } from "./CollapsedToolGroup.js";
 
 type Props = {
-  message: MessageNode;
+  message: MessageNode | CollapsedToolGroupNode;
   toolOutputById: Map<string, MessageNode>;
 };
 
@@ -14,6 +17,10 @@ type Props = {
  * message 是协议事件节点；toolOutputById 用于把工具调用和结果合并展示；返回一行或一个工具块。
  */
 export function MessageRow({ message, toolOutputById }: Props) {
+  if (message.type === "collapsed_tool_group") {
+    return <CollapsedToolGroup message={message} />;
+  }
+
   if (message.type === "user_message") {
     return <Text color={defaultTheme.user}>› {message.text}</Text>;
   }
@@ -38,6 +45,7 @@ export function MessageRow({ message, toolOutputById }: Props) {
         input={message.input}
         output={result?.type === "tool_result" ? result.output : undefined}
         ok={result?.type === "tool_result" ? result.ok : true}
+        source={message.source}
       />
     );
   }
@@ -51,13 +59,19 @@ export function MessageRow({ message, toolOutputById }: Props) {
   }
 
   if (message.type === "permission_request") {
+    const summary = formatToolUseSummary(message.toolName, message.input, { source: message.source });
     return (
       <Box flexDirection="column">
         <Text>
           <Text color={defaultTheme.warning}>●</Text> Permission
-          <Text color={defaultTheme.muted}> {message.displayName ?? message.toolName}({message.input})</Text>
+          <Text color={defaultTheme.muted}>
+            {" "}
+            {message.source === "mcp" ? message.toolName : message.displayName ?? message.toolName}
+            {summary !== null && summary !== "" ? `(${typeof summary === "string" ? summary : ""})` : ""}
+          </Text>
         </Text>
         <Box paddingLeft={2}>
+          {summary !== null && summary !== "" && typeof summary !== "string" ? summary : null}
           <Text color={defaultTheme.muted}>等待确认，风险级别：{message.risk}</Text>
         </Box>
       </Box>
@@ -69,7 +83,7 @@ export function MessageRow({ message, toolOutputById }: Props) {
       <Box flexDirection="column">
         <Text><Text color={defaultTheme.success}>●</Text> Final</Text>
         <Box paddingLeft={2}>
-          <Text>{message.text}</Text>
+          <MarkdownMessage text={message.text} />
         </Box>
       </Box>
     );

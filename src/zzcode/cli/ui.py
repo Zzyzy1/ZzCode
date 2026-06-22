@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Protocol
 
 from zzcode import __version__
-from zzcode.tools.executor import ToolExecutor
 from zzcode.ui.messages import (
     AssistantThought,
     FinalAnswer,
@@ -19,9 +18,17 @@ from zzcode.ui.renderer import PlainInlineRenderer, RichInlineRenderer
 
 
 class AgentRenderer(Protocol):
-    """Message renderer used by TextReActAgent."""
+    """Message renderer used by Agent implementations."""
 
     def render(self, message: UiMessage) -> None: ...
+
+
+class ToolDisplay(Protocol):
+    def tool_names_text(self) -> str: ...
+
+    def get_available_tools(self) -> str: ...
+
+    def iter_tools(self) -> list[object]: ...
 
 
 class PlainUI:
@@ -33,17 +40,17 @@ class PlainUI:
     def __init__(self) -> None:
         self.inline = PlainInlineRenderer()
 
-    def banner(self, model: str, tools: ToolExecutor) -> None:
+    def banner(self, model: str, tools: ToolDisplay) -> None:
         """打印启动信息。
 
         model 是当前模型名；tools 是本次会话工具集合；无返回值。
         """
 
-        print(f"ZzCode {__version__} - Text ReAct CLI")
+        print(f"ZzCode {__version__} - Tool Call CLI")
         print(f"Model: {model}")
         print(f"Tools: {tools.tool_names_text()}")
 
-    def help(self, tools: ToolExecutor) -> None:
+    def help(self, tools: ToolDisplay) -> None:
         """打印帮助信息。
 
         tools 是本次会话工具集合；无返回值。
@@ -132,7 +139,7 @@ class RichUI(PlainUI):
         self.console = Console()
         self.inline = RichInlineRenderer(self.console)
 
-    def banner(self, model: str, tools: ToolExecutor) -> None:
+    def banner(self, model: str, tools: ToolDisplay) -> None:
         from rich.panel import Panel
         from rich.table import Table
 
@@ -140,12 +147,12 @@ class RichUI(PlainUI):
         grid.add_column(style="bold cyan", justify="right")
         grid.add_column()
         grid.add_row("Version", __version__)
-        grid.add_row("Mode", "Text ReAct")
+        grid.add_row("Mode", "Tool Call")
         grid.add_row("Model", model)
         grid.add_row("Tools", tools.tool_names_text())
         self.console.print(Panel(grid, title="[bold]ZzCode[/bold]", border_style="cyan"))
 
-    def help(self, tools: ToolExecutor) -> None:
+    def help(self, tools: ToolDisplay) -> None:
         from rich.panel import Panel
         from rich.table import Table
         from rich.markup import escape

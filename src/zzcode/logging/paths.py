@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -13,9 +14,13 @@ def get_log_root_dir() -> Path:
     优先读取显式环境变量；未配置时按平台选择用户级目录。
     """
 
-    override = os.getenv("ZZCODE_LOG_DIR")
+    override = os.getenv("ZZCODE_LOG_DIR") or _read_dotenv_override()
     if override:
-        return Path(override).expanduser().resolve()
+        return resolve_log_override(override)
+
+    project_override = _infer_wsl_project_log_dir()
+    if project_override is not None:
+        return project_override
 
     if os.name == "nt":
         local_appdata = os.getenv("LOCALAPPDATA")
@@ -87,3 +92,61 @@ def sanitize_log_name(value: str) -> str:
 
     cleaned = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in value.strip())
     return cleaned or "unknown"
+
+
+def _read_dotenv_override() -> str | None:
+    """从项目 .env 中读取日志目录覆盖。"""
+
+    env_path = _resolve_project_root() / ".env"
+    if not env_path.exists():
+        return None
+
+    try:
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() != "ZZCODE_LOG_DIR":
+                continue
+            return value.strip().strip('"').strip("'")
+    except OSError:
+        return None
+    return None
+
+
+def _infer_wsl_project_log_dir() -> Path | None:
+    """在 WSL 下默认把日志写到项目同级的 Windows 目录。"""
+
+    if os.name == "nt":
+        return None
+    if "WSL_DISTRO_NAME" not in os.environ:
+        return None
+
+    project_root = _resolve_project_root()
+    parts = project_root.parts
+    if len(parts) < 3 or parts[1] != "mnt":
+        return None
+    return project_root.parent / f"{project_root.name}-logs"
+
+
+def _resolve_project_root() -> Path:
+    """返回当前进程对应的项目根目录。"""
+
+    raw = os.getenv("ZZCODE_PROJECT_ROOT")
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path.cwd().resolve()
+
+
+def resolve_log_override(raw: str) -> Path:
+    """解析显式日志目录，兼容 WSL 下的 Windows 盘符路径。"""
+
+    value = raw.strip()
+    if os.name != "nt":
+        match = re.match(r"^([A-Za-z]):[\\/](.*)$", value)
+        if match:
+            drive = match.group(1).lower()
+            tail = match.group(2).replace("\\", "/")
+            return Path(f"/mnt/{drive}/{tail}").resolve()
+    return Path(value).expanduser().resolve()

@@ -132,9 +132,11 @@ class ZzCodeLLM:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 body = json.loads(response.read().decode("utf-8"))
             llm_response = normalize_chat_response(body)
-            content = llm_response.content
-            if content:
-                log_debug(content, level="debug", component="llm")
+            log_debug(
+                _summarize_llm_response(llm_response),
+                level="debug",
+                component="llm",
+            )
             return llm_response
         except urllib.error.HTTPError as exc:  # pragma: no cover - depends on remote provider
             error_body = exc.read().decode("utf-8", errors="replace")
@@ -209,6 +211,20 @@ def _parse_tool_arguments(value: Any) -> tuple[dict[str, Any], str | None]:
     if not isinstance(parsed, dict):
         return {}, f"Tool arguments must decode to JSON object, got {type(parsed).__name__}."
     return parsed, None
+
+
+def _summarize_llm_response(response: LLMResponse) -> str:
+    """压缩 LLM 返回，避免日志被正文刷满。"""
+
+    content = " ".join(response.content.split()).strip()
+    if len(content) > 120:
+        content = content[:117] + "..."
+    if not content:
+        content = "(empty)"
+    return (
+        f"response tool_calls={len(response.tool_calls)} "
+        f"content_chars={len(response.content)} content={content}"
+    )
 
 
 def load_env_file(path: str | os.PathLike[str] = ".env") -> None:

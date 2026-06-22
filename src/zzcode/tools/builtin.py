@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import subprocess
+import warnings
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
-from .executor import ToolExecutor
+from .registry import ToolRegistry
 from .safety import reject_dangerous_command, resolve_project_path
+
+if TYPE_CHECKING:
+    from zzcode.mcp import McpManager
 
 
 MAX_READ_BYTES = 100 * 1024
@@ -14,8 +19,92 @@ COMMAND_TIMEOUT_SECONDS = 30
 WRITE_FILE_SEPARATOR = "|||"
 
 
-def register_builtin_tools(executor: ToolExecutor, project_root: Path) -> None:
-    """注册第一批真实 Code CLI 工具。
+class LegacyToolRegistrar(Protocol):
+    """legacy 文本工具注册接口。"""
+
+    def register_tool(self, name: str, description: str, func: object, display_name: str | None = None) -> None: ...
+
+
+def register_builtin_structured_tools(registry: ToolRegistry) -> None:
+    """注册第四阶段结构化内置工具。
+
+    registry 是结构化工具注册表；当前包含本地文件工具和 shell 工具。
+    """
+
+    from .local.filesystem import (
+        AppendFileTool,
+        EditFileTool,
+        ListFilesTool,
+        ReadFileTool,
+        WriteFileTool,
+    )
+    from .local.search import GlobTool, GrepTool
+    from .local.shell import RunShellTool
+
+    registry.register(ListFilesTool())
+    registry.register(GlobTool())
+    registry.register(GrepTool())
+    registry.register(ReadFileTool())
+    registry.register(WriteFileTool())
+    registry.register(EditFileTool())
+    registry.register(AppendFileTool())
+    registry.register(RunShellTool())
+
+
+def build_tool_registry(
+    project_root: Path | None = None,
+    mcp_manager: "McpManager | None" = None,
+) -> ToolRegistry:
+    """构建结构化工具注册表。
+
+    project_root 当前仅保留给 MCP/resource 组装使用；mcp_manager 提供外部 MCP 工具来源。
+    """
+
+    registry = ToolRegistry()
+    register_builtin_structured_tools(registry)
+    if mcp_manager is not None:
+        register_mcp_structured_tools(registry, mcp_manager)
+        register_mcp_resource_tools(registry, mcp_manager)
+    return registry
+
+
+def build_builtin_tool_registry() -> ToolRegistry:
+    """构建第四阶段结构化内置工具注册表。"""
+
+    return build_tool_registry()
+
+
+def register_mcp_structured_tools(registry: ToolRegistry, mcp_manager: "McpManager") -> None:
+    """注册 MCP 来源的结构化工具，冲突时保留已有本地工具。"""
+
+    from zzcode.mcp import build_mcp_tools
+
+    for tool in build_mcp_tools(mcp_manager, mcp_manager.list_tools()):
+        if tool.name in registry:
+            warnings.warn(
+                f"Skipping MCP tool '{tool.name}' because a local tool with the same name exists.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            continue
+        registry.register(tool)
+
+
+def register_mcp_resource_tools(registry: ToolRegistry, mcp_manager: "McpManager") -> None:
+    """在存在 MCP resource server 时注册显式 resource 工具。"""
+
+    if not mcp_manager.has_resource_servers():
+        return
+
+    from zzcode.tools.mcp import ListMcpResourcesTool, ReadMcpResourceTool
+
+    for tool in (ListMcpResourcesTool(mcp_manager), ReadMcpResourceTool(mcp_manager)):
+        if tool.name not in registry:
+            registry.register(tool)
+
+
+def register_builtin_tools(executor: LegacyToolRegistrar, project_root: Path) -> None:
+    """注册 legacy 文本 ReAct 工具。
 
     executor 是工具注册表；project_root 是工具允许操作的项目根目录；无返回值。
     """

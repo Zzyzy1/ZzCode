@@ -6,6 +6,8 @@ This file is an index of durable memories. Each entry points to a separate markd
 
 ## Project
 
+- [ZzCode 第五阶段已接入 MCP](project-mcp-phase5-completed.md)
+
 ## Feedback
 
 ## Reference
