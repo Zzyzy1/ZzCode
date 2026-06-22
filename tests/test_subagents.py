@@ -1,7 +1,9 @@
 import json
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from zzcode.agent.react_text import TextReActAgent
 from zzcode.legacy import build_legacy_tools
@@ -15,6 +17,7 @@ from zzcode.subagents import (
     SessionMemoryUpdateResult,
     SessionMemoryUpdateWorker,
     SidechainTranscriptRecorder,
+    SystemAgentScheduleResult,
     SubagentDefinition,
     SystemAgentScheduler,
     UserSubagentRunner,
@@ -729,6 +732,82 @@ class SystemAgentSchedulerTest(unittest.TestCase):
         self.assertIsNone(result.auto_memory)
         self.assertEqual(result.errors, ())
 
+    def test_scheduler_schedules_turn_finished_in_background(self) -> None:
+        with TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            started = threading.Event()
+            release = threading.Event()
+            project_root = Path(tmp)
+            parent_scope = create_session_scope(project_root, "main-session")
+            scheduler = _FakeSystemAgentScheduler(
+                project_root=project_root,
+                parent_scope=parent_scope,
+                llm_client=FakeThinkClient([]),
+                calls=calls,
+                session_started=started,
+                session_release=release,
+            )
+
+            scheduled = scheduler.schedule_turn_finished()
+            self.assertTrue(started.wait(timeout=2))
+            self.assertEqual(scheduled, SystemAgentScheduleResult(scheduled=True, reason="scheduled"))
+            self.assertEqual(calls, ["session:False"])
+
+            release.set()
+            drained = scheduler.drain_pending(timeout_seconds=2)
+            scheduler.close(timeout_seconds=0)
+
+        self.assertTrue(drained)
+        self.assertEqual(calls, ["session:False", "auto"])
+
+    def test_scheduler_coalesces_pending_background_turns(self) -> None:
+        with TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            started = threading.Event()
+            release = threading.Event()
+            project_root = Path(tmp)
+            parent_scope = create_session_scope(project_root, "main-session")
+            scheduler = _FakeSystemAgentScheduler(
+                project_root=project_root,
+                parent_scope=parent_scope,
+                llm_client=FakeThinkClient([]),
+                calls=calls,
+                session_started=started,
+                session_release=release,
+            )
+
+            first = scheduler.schedule_turn_finished()
+            self.assertTrue(started.wait(timeout=2))
+            second = scheduler.schedule_turn_finished()
+            release.set()
+            drained = scheduler.drain_pending(timeout_seconds=2)
+            scheduler.close(timeout_seconds=0)
+
+        self.assertTrue(first.scheduled)
+        self.assertFalse(second.scheduled)
+        self.assertTrue(second.pending)
+        self.assertTrue(drained)
+        self.assertEqual(calls, ["session:False", "auto", "session:False", "auto"])
+
+    def test_scheduler_can_disable_background_system_agents(self) -> None:
+        with TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            project_root = Path(tmp)
+            parent_scope = create_session_scope(project_root, "main-session")
+            scheduler = _FakeSystemAgentScheduler(
+                project_root=project_root,
+                parent_scope=parent_scope,
+                llm_client=FakeThinkClient([]),
+                calls=calls,
+            )
+
+            with patch.dict("os.environ", {"ZZCODE_SYSTEM_AGENTS": "0"}):
+                scheduled = scheduler.schedule_turn_finished()
+
+        self.assertFalse(scheduled.scheduled)
+        self.assertTrue(scheduled.disabled)
+        self.assertEqual(calls, [])
+
     def test_scheduler_collects_worker_errors_without_raising(self) -> None:
         with TemporaryDirectory() as tmp:
             calls: list[str] = []
@@ -754,26 +833,55 @@ class SystemAgentSchedulerTest(unittest.TestCase):
 
 
 class _FakeSystemAgentScheduler(SystemAgentScheduler):
-    def __init__(self, *args, calls: list[str], fail_session: bool = False, fail_auto: bool = False, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        calls: list[str],
+        fail_session: bool = False,
+        fail_auto: bool = False,
+        session_started: threading.Event | None = None,
+        session_release: threading.Event | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.calls = calls
         self.fail_session = fail_session
         self.fail_auto = fail_auto
+        self.session_started = session_started
+        self.session_release = session_release
 
     def _session_memory_worker(self):
-        return _FakeSessionMemoryWorker(self.calls, self.fail_session)
+        return _FakeSessionMemoryWorker(
+            self.calls,
+            self.fail_session,
+            started=self.session_started,
+            release=self.session_release,
+        )
 
     def _auto_memory_worker(self):
         return _FakeAutoMemoryWorker(self.calls, self.fail_auto)
 
 
 class _FakeSessionMemoryWorker:
-    def __init__(self, calls: list[str], fail: bool) -> None:
+    def __init__(
+        self,
+        calls: list[str],
+        fail: bool,
+        *,
+        started: threading.Event | None = None,
+        release: threading.Event | None = None,
+    ) -> None:
         self.calls = calls
         self.fail = fail
+        self.started = started
+        self.release = release
 
     def run(self, *, force: bool = False) -> SessionMemoryUpdateResult:
         self.calls.append(f"session:{force}")
+        if self.started is not None:
+            self.started.set()
+        if self.release is not None:
+            self.release.wait(timeout=2)
         if self.fail:
             raise RuntimeError("session failed")
         return SessionMemoryUpdateResult(

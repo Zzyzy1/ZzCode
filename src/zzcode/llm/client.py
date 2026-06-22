@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -109,7 +110,18 @@ class ZzCodeLLM:
         返回标准化 LLMResponse，HTTP 或网络失败时返回 None。
         """
 
-        log_debug(f"Calling model: {self.model}", level="info", component="llm")
+        request_started_at = time.perf_counter()
+        message_chars = sum(len(str(message.get("content") or "")) for message in messages)
+        log_debug(
+            "request start "
+            f"model={self.model} "
+            f"messages={len(messages)} "
+            f"message_chars={message_chars} "
+            f"tools={len(tools or [])} "
+            f"timeout={self.timeout}",
+            level="info",
+            component="llm",
+        )
         try:
             # 这里直接使用标准库 HTTP，避免第一阶段依赖 openai SDK。
             payload = {
@@ -129,11 +141,23 @@ class ZzCodeLLM:
                 },
                 method="POST",
             )
+            http_started_at = time.perf_counter()
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                body = json.loads(response.read().decode("utf-8"))
+                status_code = getattr(response, "status", "unknown")
+                raw_body = response.read()
+            http_elapsed_ms = (time.perf_counter() - http_started_at) * 1000
+            log_debug(
+                f"http response status={status_code} bytes={len(raw_body)} elapsed_ms={http_elapsed_ms:.1f}",
+                level="info",
+                component="llm",
+            )
+            normalize_started_at = time.perf_counter()
+            body = json.loads(raw_body.decode("utf-8"))
             llm_response = normalize_chat_response(body)
             log_debug(
-                _summarize_llm_response(llm_response),
+                _summarize_llm_response(llm_response)
+                + f" normalize_ms={(time.perf_counter() - normalize_started_at) * 1000:.1f}"
+                + f" total_ms={(time.perf_counter() - request_started_at) * 1000:.1f}",
                 level="debug",
                 component="llm",
             )
@@ -143,11 +167,22 @@ class ZzCodeLLM:
             log_error(
                 exc,
                 component="llm",
-                context={"status_code": exc.code, "response_body": error_body},
+                context={
+                    "status_code": exc.code,
+                    "response_body": error_body,
+                    "elapsed_ms": f"{(time.perf_counter() - request_started_at) * 1000:.1f}",
+                },
             )
             return None
         except Exception as exc:  # pragma: no cover - depends on remote provider
-            log_error(exc, component="llm", context={"phase": "chat"})
+            log_error(
+                exc,
+                component="llm",
+                context={
+                    "phase": "chat",
+                    "elapsed_ms": f"{(time.perf_counter() - request_started_at) * 1000:.1f}",
+                },
+            )
             return None
 
     def _chat_completions_url(self) -> str:

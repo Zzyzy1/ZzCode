@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Protocol
 
 from zzcode.llm.client import ChatClient, LLMToolCall
+from zzcode.logging import log_debug
 from zzcode.tools.base import PermissionChecker, ToolCall, ToolContext
 from zzcode.tools.registry import ToolRegistry
 from zzcode.tools.results import ToolResult as StructuredToolResult
@@ -76,16 +78,43 @@ class ToolCallAgent:
     def run(self, question: str, session_context: str = "") -> str | None:
         """执行结构化 tool call 循环。"""
 
+        run_started_at = time.perf_counter()
         self.messages = self._initial_messages(question, session_context)
+        log_debug(
+            "run start "
+            f"question_chars={len(question)} "
+            f"session_context_chars={len(session_context)} "
+            f"initial_messages={len(self.messages)} "
+            f"tools={len(self.tool_registry.to_openai_tools())}",
+            level="info",
+            component="agent",
+        )
 
         for step in range(1, self.max_steps + 1):
+            step_started_at = time.perf_counter()
+            log_debug(
+                f"step start step={step} messages={len(self.messages)}",
+                level="info",
+                component="agent",
+            )
             self.renderer.render(StepStarted(step, self.max_steps))
+            llm_started_at = time.perf_counter()
             response = self.llm_client.chat(
                 self.messages,
                 tools=self.tool_registry.to_openai_tools(),
             )
+            log_debug(
+                f"step llm returned step={step} ok={response is not None} elapsed_ms={(time.perf_counter() - llm_started_at) * 1000:.1f}",
+                level="info",
+                component="agent",
+            )
             if response is None:
                 self.renderer.render(SystemNotice("LLM returned no response.", "error"))
+                log_debug(
+                    f"run end reason=llm_none elapsed_ms={(time.perf_counter() - run_started_at) * 1000:.1f}",
+                    level="warn",
+                    component="agent",
+                )
                 return None
 
             if response.content and response.tool_calls:
@@ -97,23 +126,63 @@ class ToolCallAgent:
             if not response.tool_calls:
                 final_answer = response.content
                 self.renderer.render(FinalAnswer(final_answer))
+                log_debug(
+                    "run end "
+                    "reason=final_answer "
+                    f"step={step} "
+                    f"answer_chars={len(final_answer)} "
+                    f"step_elapsed_ms={(time.perf_counter() - step_started_at) * 1000:.1f} "
+                    f"elapsed_ms={(time.perf_counter() - run_started_at) * 1000:.1f}",
+                    level="info",
+                    component="agent",
+                )
                 return final_answer
 
+            log_debug(
+                f"step tool_calls step={step} count={len(response.tool_calls)} content_chars={len(response.content)}",
+                level="info",
+                component="agent",
+            )
             for llm_tool_call in response.tool_calls:
                 result = self._run_tool_call(llm_tool_call)
                 self.messages.append(result.to_openai_message())
                 if _is_user_denied_tool_result(result):
                     self.renderer.render(SystemNotice("用户已拒绝工具执行，本轮任务已停止。", "warning"))
+                    log_debug(
+                        f"run end reason=user_denied step={step} elapsed_ms={(time.perf_counter() - run_started_at) * 1000:.1f}",
+                        level="warn",
+                        component="agent",
+                    )
                     return None
+            log_debug(
+                f"step end step={step} elapsed_ms={(time.perf_counter() - step_started_at) * 1000:.1f} messages={len(self.messages)}",
+                level="info",
+                component="agent",
+            )
 
         self.renderer.render(SystemNotice("Stopped: max steps reached.", "warning"))
+        log_debug(
+            f"run end reason=max_steps elapsed_ms={(time.perf_counter() - run_started_at) * 1000:.1f}",
+            level="warn",
+            component="agent",
+        )
         return None
 
     def _run_tool_call(self, llm_tool_call: LLMToolCall) -> StructuredToolResult:
+        tool_started_at = time.perf_counter()
         tool = self.tool_registry.get(llm_tool_call.name)
         display_name = tool.display_name if tool else None
         source = getattr(tool, "source", "local") if tool else "unknown"
         mcp_info = getattr(tool, "mcp_info", None) if tool else None
+        log_debug(
+            "tool call start "
+            f"id={llm_tool_call.id} "
+            f"name={llm_tool_call.name} "
+            f"source={source} "
+            f"arg_keys={','.join(sorted(str(key) for key in llm_tool_call.arguments.keys()))}",
+            level="info",
+            component="agent",
+        )
         self.renderer.render(
             ToolUse(
                 llm_tool_call.name,
@@ -161,6 +230,16 @@ class ToolCallAgent:
                 source=source,
                 mcp_info=mcp_info,
             )
+        )
+        log_debug(
+            "tool call end "
+            f"id={llm_tool_call.id} "
+            f"name={llm_tool_call.name} "
+            f"ok={result.ok} "
+            f"result_chars={len(result.content)} "
+            f"elapsed_ms={(time.perf_counter() - tool_started_at) * 1000:.1f}",
+            level="info",
+            component="agent",
         )
         return result
 

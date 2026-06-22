@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import json
+import threading
+import time
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from zzcode.llm.client import ThinkClient
+from zzcode.logging import log_debug
 from zzcode.memory.auto import (
     ensure_auto_memory,
     format_auto_memory_manifest,
@@ -65,6 +70,16 @@ class SystemAgentSchedulerResult:
     errors: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class SystemAgentScheduleResult:
+    """后台系统子 Agent 调度结果。"""
+
+    scheduled: bool
+    pending: bool = False
+    disabled: bool = False
+    reason: str = ""
+
+
 class SystemAgentScheduler:
     """按主 Agent 生命周期触发系统子 Agent worker。"""
 
@@ -80,9 +95,78 @@ class SystemAgentScheduler:
         self.parent_scope = parent_scope
         self.llm_client = llm_client
         self.max_steps = max_steps
+        self._lock = threading.Lock()
+        self._executor: ThreadPoolExecutor | None = None
+        self._future: Future[None] | None = None
+        self._pending_turn = False
+        self._closed = False
 
     def on_turn_finished(self) -> SystemAgentSchedulerResult:
         """主 Agent 成功回答后，同步执行系统维护任务。"""
+
+        return self._run_turn_finished_once()
+
+    def schedule_turn_finished(self) -> SystemAgentScheduleResult:
+        """主 Agent 成功回答后，后台调度系统维护任务。
+
+        若已有任务在运行，只记录 pending，等当前任务结束后合并执行一次。
+        """
+
+        if _system_agents_disabled():
+            log_debug("background system agents skipped disabled=true", level="debug", component="system-agents")
+            return SystemAgentScheduleResult(scheduled=False, disabled=True, reason="disabled")
+        if _background_system_agents_disabled():
+            result = self._run_turn_finished_once()
+            self._log_background_result("synchronous fallback", result)
+            return SystemAgentScheduleResult(scheduled=False, reason="background_disabled")
+
+        with self._lock:
+            if self._closed:
+                return SystemAgentScheduleResult(scheduled=False, reason="closed")
+            if self._future is not None and not self._future.done():
+                self._pending_turn = True
+                log_debug("background system agents coalesced pending=true", level="info", component="system-agents")
+                return SystemAgentScheduleResult(scheduled=False, pending=True, reason="in_progress")
+            self._ensure_executor_locked()
+            self._future = self._executor.submit(self._background_loop) if self._executor is not None else None
+            log_debug("background system agents scheduled", level="info", component="system-agents")
+            return SystemAgentScheduleResult(scheduled=True, reason="scheduled")
+
+    def drain_pending(self, timeout_seconds: float = 5.0) -> bool:
+        """等待后台系统任务完成，超时返回 False。"""
+
+        deadline = time.monotonic() + max(timeout_seconds, 0.0)
+        while True:
+            with self._lock:
+                future = self._future
+            if future is None:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                log_debug("background system agents drain timed out", level="warn", component="system-agents")
+                return False
+            try:
+                future.result(timeout=remaining)
+            except TimeoutError:
+                log_debug("background system agents drain timed out", level="warn", component="system-agents")
+                return False
+            except Exception as exc:
+                log_debug(f"background system agents future failed during drain: {exc}", level="error", component="system-agents")
+                return True
+
+    def close(self, *, timeout_seconds: float = 5.0) -> None:
+        """关闭后台调度器。"""
+
+        self.drain_pending(timeout_seconds=timeout_seconds)
+        with self._lock:
+            self._closed = True
+            executor = self._executor
+            self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=False)
+
+    def _run_turn_finished_once(self) -> SystemAgentSchedulerResult:
+        """执行一次系统维护任务。"""
 
         errors: list[str] = []
         session_result: SessionMemoryUpdateResult | None = None
@@ -100,6 +184,54 @@ class SystemAgentScheduler:
             auto_memory=auto_result,
             errors=tuple(errors),
         )
+
+    def _background_loop(self) -> None:
+        """后台串行执行系统维护任务，并合并运行期间产生的新 turn。"""
+
+        while True:
+            started_at = time.perf_counter()
+            result = self._run_turn_finished_once()
+            self._log_background_result("background finished", result, elapsed_ms=(time.perf_counter() - started_at) * 1000)
+            with self._lock:
+                if self._pending_turn and not self._closed:
+                    self._pending_turn = False
+                    log_debug("background system agents running trailing update", level="info", component="system-agents")
+                    continue
+                self._future = None
+                return
+
+    def _ensure_executor_locked(self) -> None:
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="zzcode-system-agents")
+
+    def _log_background_result(
+        self,
+        label: str,
+        result: SystemAgentSchedulerResult,
+        *,
+        elapsed_ms: float | None = None,
+    ) -> None:
+        parts = [label]
+        if elapsed_ms is not None:
+            parts.append(f"elapsed_ms={elapsed_ms:.1f}")
+        if result.session_memory is not None:
+            parts.append(
+                "session_memory="
+                f"ran:{result.session_memory.ran} "
+                f"updated:{result.session_memory.updated} "
+                f"events:{result.session_memory.event_count}"
+            )
+        if result.auto_memory is not None:
+            parts.append(
+                "auto_memory="
+                f"ran:{result.auto_memory.ran} "
+                f"updated:{result.auto_memory.updated} "
+                f"skipped:{result.auto_memory.skipped} "
+                f"events:{result.auto_memory.event_count}"
+            )
+        if result.errors:
+            parts.append("errors=" + " | ".join(result.errors))
+        log_debug(" ".join(parts), level="debug", component="system-agents")
 
     def before_compact(self) -> SystemAgentSchedulerResult:
         """compact 前强制刷新当前 session memory。"""
@@ -506,3 +638,13 @@ def _path_is_auto_memory_path(project_root: Path, path_text: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _system_agents_disabled() -> bool:
+    raw = os.getenv("ZZCODE_SYSTEM_AGENTS", "1").strip().lower()
+    return raw in {"0", "false", "no", "off"}
+
+
+def _background_system_agents_disabled() -> bool:
+    raw = os.getenv("ZZCODE_SYSTEM_AGENTS_BACKGROUND", "1").strip().lower()
+    return raw in {"0", "false", "no", "off"}

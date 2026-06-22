@@ -12,6 +12,7 @@ from .system import (
     SessionMemoryUpdateResult,
     SessionMemoryUpdateWorker,
     SystemAgentScheduler,
+    SystemAgentScheduleResult,
     SystemAgentSchedulerResult,
 )
 from .transcript import SidechainTranscriptRecorder
@@ -29,6 +30,7 @@ __all__ = [
     "SessionMemoryUpdateResult",
     "SessionMemoryUpdateWorker",
     "SystemAgentScheduler",
+    "SystemAgentScheduleResult",
     "SystemAgentSchedulerResult",
     "SidechainTranscriptRecorder",
     "SilentRenderer",

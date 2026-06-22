@@ -7,6 +7,7 @@ import difflib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Iterable, TextIO
 
@@ -22,7 +23,7 @@ from zzcode.logging import (
 )
 from zzcode.memory import ShortTermSessionMemory, TranscriptRecorder, build_memory_context, create_session_scope
 from zzcode.protocol.events import JsonLineEventWriter, JsonLineRenderer
-from zzcode.subagents import SystemAgentScheduler, SystemAgentSchedulerResult
+from zzcode.subagents import SystemAgentScheduler, SystemAgentScheduleResult, SystemAgentSchedulerResult
 from zzcode.tools.base import ToolPermissionRequest, ToolPermissionResult
 from zzcode.tools.builtin import WRITE_FILE_SEPARATOR
 from zzcode.tools.safety import resolve_project_path
@@ -87,6 +88,11 @@ def main(argv: list[str] | None = None) -> int:
         llm_client=llm,
     )
     tools = build_tool_registry(project_root, mcp_manager=mcp_manager)
+    log_debug(
+        f"tool registry ready tool_count={len(tools.to_openai_tools())}",
+        level="info",
+        component="protocol",
+    )
     renderer = JsonLineRenderer(writer)
     agent = ToolCallAgent(
         llm_client=llm,
@@ -100,7 +106,13 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     for request in _read_requests(sys.stdin):
+        turn_started_at = time.perf_counter()
         request_type = request.get("type")
+        log_debug(
+            f"request received type={request_type or 'unknown'} keys={','.join(sorted(str(key) for key in request.keys()))}",
+            level="debug",
+            component="protocol",
+        )
         if request_type == "clear_history":
             _debug_memory(f"clear history previous_items={len(session_memory)}")
             session_memory.clear()
@@ -154,15 +166,23 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         # 前端通过 user_message 发起请求；后端回显同一事件，让消息流完全来自协议。
+        log_debug(
+            f"turn start text_chars={len(text)} session_items={len(session_memory)}",
+            level="info",
+            component="protocol",
+        )
         writer.write({"type": "user_message", "text": text})
+        log_debug("turn user_message echoed", level="debug", component="protocol")
         transcript.begin_turn()
         transcript.record_user(text)
+        memory_started_at = time.perf_counter()
         memory_context = build_memory_context(
             project_root,
             session_memory.as_list(),
             compact_summary=session_memory.compact_summary(),
             current_session=session_scope,
         )
+        memory_elapsed_ms = (time.perf_counter() - memory_started_at) * 1000
         _debug_memory(
             "request "
             f"user={_compact_debug_text(text)} "
@@ -174,12 +194,21 @@ def main(argv: list[str] | None = None) -> int:
             f"current_session_memory_chars={memory_context.current_session_memory_chars} "
             f"compact_summary_chars={memory_context.compact_summary_chars} "
             f"session_notes_chars={memory_context.session_notes_chars} "
-            f"context_chars={len(memory_context.text)}"
+            f"context_chars={len(memory_context.text)} "
+            f"elapsed_ms={memory_elapsed_ms:.1f}"
         )
         if memory_context.text:
             _debug_memory(f"context {_compact_debug_text(memory_context.text, max_length=500)}")
 
+        agent_started_at = time.perf_counter()
+        log_debug("agent run start", level="info", component="protocol")
         answer = agent.run(text, session_context=memory_context.text)
+        agent_elapsed_ms = (time.perf_counter() - agent_started_at) * 1000
+        log_debug(
+            f"agent run end ok={answer is not None} answer_chars={len(answer or '')} elapsed_ms={agent_elapsed_ms:.1f}",
+            level="info",
+            component="protocol",
+        )
         if answer:
             transcript.record_assistant(answer)
             removed_count = session_memory.record_turn(text, answer)
@@ -218,14 +247,22 @@ def main(argv: list[str] | None = None) -> int:
         else:
             _debug_memory("request finished without answer; turn was not saved")
         transcript.end_turn()
-        if answer:
-            turn_update = system_agents.on_turn_finished()
-            _debug_system_agents("turn finished", turn_update)
         writer.write({"type": "request_done", "ok": answer is not None})
+        total_elapsed_ms = (time.perf_counter() - turn_started_at) * 1000
+        log_debug(
+            f"turn done ok={answer is not None} elapsed_ms={total_elapsed_ms:.1f}",
+            level="info",
+            component="protocol",
+        )
+        if answer:
+            scheduled = system_agents.schedule_turn_finished()
+            _debug_system_agents_schedule("turn finished", scheduled)
 
         if args.once:
             break
 
+    drain_timeout = float(os.getenv("ZZCODE_SYSTEM_AGENTS_DRAIN_TIMEOUT") or "5")
+    system_agents.close(timeout_seconds=drain_timeout)
     if mcp_manager is not None:
         mcp_manager.close_all()
     flush_debug_logs()
@@ -240,15 +277,26 @@ def _read_requests(lines: Iterable[str]) -> Iterable[dict[str, Any]]:
 
     writer = JsonLineEventWriter()
     for raw_line in lines:
+        received_at = time.perf_counter()
         line = raw_line.strip()
         if not line:
             continue
+        log_debug(
+            f"stdin line received bytes={len(raw_line.encode('utf-8'))}",
+            level="debug",
+            component="protocol",
+        )
         try:
             value = json.loads(line)
         except json.JSONDecodeError as exc:
             writer.write({"type": "system_notice", "level": "error", "text": f"请求 JSON 解析失败: {exc}"})
             continue
         if isinstance(value, dict):
+            log_debug(
+                f"stdin json parsed type={value.get('type') or 'unknown'} elapsed_ms={(time.perf_counter() - received_at) * 1000:.1f}",
+                level="debug",
+                component="protocol",
+            )
             yield value
         else:
             writer.write({"type": "system_notice", "level": "warning", "text": "请求必须是 JSON object。"})
@@ -295,6 +343,17 @@ def _debug_system_agents(label: str, result: SystemAgentSchedulerResult) -> None
     log_debug(" ".join(parts), level="debug", component="system-agents")
 
 
+def _debug_system_agents_schedule(label: str, result: SystemAgentScheduleResult) -> None:
+    """输出系统子 Agent 后台调度结果。"""
+
+    log_debug(
+        f"{label} scheduled={result.scheduled} pending={result.pending} "
+        f"disabled={result.disabled} reason={result.reason or '-'}",
+        level="debug",
+        component="system-agents",
+    )
+
+
 def _compact_debug_text(text: str, max_length: int = 160) -> str:
     """压缩调试文本，避免长对话把控制台刷满。"""
 
@@ -339,12 +398,28 @@ class PermissionBridge:
         """请求一次结构化工具执行权限。"""
 
         if _is_auto_allowed_memory_tool(request.tool_name, request.args, self.session_id):
+            log_debug(
+                f"permission auto allowed tool={request.tool_name} reason=memory_tool",
+                level="debug",
+                component="permission",
+            )
             return ToolPermissionResult.allow(reason="auto_allowed_memory_tool")
         if request.tool_name in self._session_allowed_tools:
+            log_debug(
+                f"permission session allowed tool={request.tool_name}",
+                level="debug",
+                component="permission",
+            )
             return ToolPermissionResult.allow(reason="session_allowed")
 
         self._index += 1
         request_id = f"permission-{self._index}"
+        log_debug(
+            f"permission request start id={request_id} tool={request.tool_name} destructive={request.is_destructive}",
+            level="info",
+            component="permission",
+        )
+        permission_started_at = time.perf_counter()
         self.writer.write(
             {
                 "type": "permission_request",
@@ -374,11 +449,31 @@ class PermissionBridge:
             decision = response.get("decision")
             if decision == "allow_session":
                 self._session_allowed_tools.add(request.tool_name)
+                log_debug(
+                    f"permission request end id={request_id} decision=allow_session elapsed_ms={(time.perf_counter() - permission_started_at) * 1000:.1f}",
+                    level="info",
+                    component="permission",
+                )
                 return ToolPermissionResult.allow(reason="allow_session")
             if decision == "allow_once":
+                log_debug(
+                    f"permission request end id={request_id} decision=allow_once elapsed_ms={(time.perf_counter() - permission_started_at) * 1000:.1f}",
+                    level="info",
+                    component="permission",
+                )
                 return ToolPermissionResult.allow(reason="allow_once")
+            log_debug(
+                f"permission request end id={request_id} decision=deny elapsed_ms={(time.perf_counter() - permission_started_at) * 1000:.1f}",
+                level="info",
+                component="permission",
+            )
             return ToolPermissionResult.deny("Tool execution denied by user.", reason="user_denied")
 
+        log_debug(
+            f"permission request end id={request_id} decision=stream_ended elapsed_ms={(time.perf_counter() - permission_started_at) * 1000:.1f}",
+            level="warn",
+            component="permission",
+        )
         return ToolPermissionResult.deny("Permission response stream ended.", reason="permission_stream_ended")
 
 

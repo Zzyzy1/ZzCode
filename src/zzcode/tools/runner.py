@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
+
+from zzcode.logging import log_debug
 
 from .base import (
     JsonObject,
@@ -28,8 +31,19 @@ class ToolRunner:
     def run(self, tool_call: ToolCall, context: ToolContext) -> ToolResult:
         """执行一次工具调用并返回结构化结果。"""
 
+        started_at = time.perf_counter()
+        log_debug(
+            f"run start id={tool_call.id} name={tool_call.name}",
+            level="info",
+            component="tool-runner",
+        )
         tool = self.registry.get(tool_call.name)
         if tool is None:
+            log_debug(
+                f"run end id={tool_call.id} name={tool_call.name} ok=False reason=unknown_tool elapsed_ms={(time.perf_counter() - started_at) * 1000:.1f}",
+                level="warn",
+                component="tool-runner",
+            )
             return ToolResult.failure(
                 tool_call.id,
                 tool_call.name,
@@ -38,6 +52,11 @@ class ToolRunner:
             )
 
         if not isinstance(tool_call.args, dict):
+            log_debug(
+                f"run end id={tool_call.id} name={tool_call.name} ok=False reason=invalid_arguments elapsed_ms={(time.perf_counter() - started_at) * 1000:.1f}",
+                level="warn",
+                component="tool-runner",
+            )
             return ToolResult.failure(
                 tool_call.id,
                 tool_call.name,
@@ -49,15 +68,31 @@ class ToolRunner:
 
         schema_result = validate_json_schema(args, tool.input_schema)
         if not schema_result.ok:
+            log_debug(
+                f"validation failed id={tool_call.id} name={tool_call.name} phase=schema errors={len(schema_result.errors)}",
+                level="warn",
+                component="tool-runner",
+            )
             return self._validation_failure(tool_call, schema_result.errors)
 
         validation_result = tool.validate_input(args)
         if not validation_result.ok:
+            log_debug(
+                f"validation failed id={tool_call.id} name={tool_call.name} phase=tool errors={len(validation_result.errors)}",
+                level="warn",
+                component="tool-runner",
+            )
             return self._validation_failure(tool_call, validation_result.errors)
 
+        permission_check_started_at = time.perf_counter()
         try:
             permission_result = tool.check_permission(args, context)
         except Exception as exc:
+            log_debug(
+                f"permission check exception id={tool_call.id} name={tool_call.name} elapsed_ms={(time.perf_counter() - permission_check_started_at) * 1000:.1f}",
+                level="error",
+                component="tool-runner",
+            )
             return ToolResult.failure(
                 tool_call.id,
                 tool_call.name,
@@ -66,6 +101,16 @@ class ToolRunner:
             )
 
         permission_args = permission_result.updated_args or args
+        log_debug(
+            "permission check returned "
+            f"id={tool_call.id} "
+            f"name={tool_call.name} "
+            f"behavior={permission_result.behavior} "
+            f"elapsed_ms={(time.perf_counter() - permission_check_started_at) * 1000:.1f}",
+            level="debug",
+            component="tool-runner",
+        )
+        permission_resolve_started_at = time.perf_counter()
         permission_result = self._resolve_permission(
             tool_call=tool_call,
             context=context,
@@ -77,8 +122,23 @@ class ToolRunner:
             source=getattr(tool, "source", "local"),
             mcp_info=getattr(tool, "mcp_info", None),
         )
+        log_debug(
+            "permission resolved "
+            f"id={tool_call.id} "
+            f"name={tool_call.name} "
+            f"behavior={permission_result.behavior} "
+            f"reason={permission_result.reason or '-'} "
+            f"elapsed_ms={(time.perf_counter() - permission_resolve_started_at) * 1000:.1f}",
+            level="info",
+            component="tool-runner",
+        )
         if permission_result.behavior != "allow":
             message = permission_result.message or f"Tool execution denied: {tool_call.name}"
+            log_debug(
+                f"run end id={tool_call.id} name={tool_call.name} ok=False reason={permission_result.reason or 'permission_denied'} elapsed_ms={(time.perf_counter() - started_at) * 1000:.1f}",
+                level="warn",
+                component="tool-runner",
+            )
             return ToolResult.failure(
                 tool_call.id,
                 tool_call.name,
@@ -90,9 +150,26 @@ class ToolRunner:
             )
 
         call_args = permission_result.updated_args or permission_args
+        call_started_at = time.perf_counter()
         try:
-            return tool.call(call_args, context, tool_call.id)
+            result = tool.call(call_args, context, tool_call.id)
+            log_debug(
+                "run end "
+                f"id={tool_call.id} "
+                f"name={tool_call.name} "
+                f"ok={result.ok} "
+                f"call_ms={(time.perf_counter() - call_started_at) * 1000:.1f} "
+                f"elapsed_ms={(time.perf_counter() - started_at) * 1000:.1f}",
+                level="info",
+                component="tool-runner",
+            )
+            return result
         except Exception as exc:
+            log_debug(
+                f"tool exception id={tool_call.id} name={tool_call.name} call_ms={(time.perf_counter() - call_started_at) * 1000:.1f} elapsed_ms={(time.perf_counter() - started_at) * 1000:.1f}",
+                level="error",
+                component="tool-runner",
+            )
             return ToolResult.failure(
                 tool_call.id,
                 tool_call.name,

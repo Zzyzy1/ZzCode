@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from typing import Any, TextIO
 
+from zzcode.logging import log_debug
 from zzcode.ui.messages import (
     AssistantThought,
     FinalAnswer,
@@ -32,9 +34,18 @@ class JsonLineEventWriter:
         event 是可 JSON 序列化的字典；函数会立即 flush，方便前端实时渲染。
         """
 
+        started_at = time.perf_counter()
         line = json.dumps(event, ensure_ascii=False)
         self.output.write(f"{line}\n")
         self.output.flush()
+        log_debug(
+            "event written "
+            f"type={event.get('type') or 'unknown'} "
+            f"bytes={len(line.encode('utf-8'))} "
+            f"elapsed_ms={(time.perf_counter() - started_at) * 1000:.1f}",
+            level="debug",
+            component="protocol",
+        )
 
 
 class JsonLineRenderer:

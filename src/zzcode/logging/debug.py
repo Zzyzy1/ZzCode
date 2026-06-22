@@ -39,6 +39,7 @@ class LoggingContext:
 _context = LoggingContext(cwd=os.getcwd())
 _writer: BufferedFileWriter | None = None
 _registered_exit_hook = False
+_logging_failed = False
 
 
 def configure_logging_context(
@@ -108,12 +109,19 @@ def flush_debug_logs() -> None:
     """主动刷盘 debug 日志。"""
 
     if _writer is not None:
-        _writer.flush()
+        try:
+            _writer.flush()
+        except OSError:
+            pass
 
 
 def log_debug(message: str, *, level: DebugLogLevel = "debug", component: str | None = None) -> None:
     """写入一条调试日志。"""
 
+    global _logging_failed
+
+    if _logging_failed:
+        return
     if _LEVEL_ORDER[level] < _LEVEL_ORDER[get_min_debug_level()]:
         return
     if not is_debug_enabled():
@@ -124,8 +132,13 @@ def log_debug(message: str, *, level: DebugLogLevel = "debug", component: str | 
     level_text = level.upper().ljust(5)
     component_text = (component or "-")[:14].ljust(14)
     line = f"{timestamp} | {level_text} | {component_text} | {normalized}\n"
-    writer = _get_writer()
-    writer.write(line)
+    try:
+        writer = _get_writer()
+        writer.write(line)
+    except OSError:
+        # 调试日志不能影响 Agent 主流程；路径不可写时本进程后续跳过 debug 写入。
+        _logging_failed = True
+        return
     if is_debug_to_stderr():
         write_to_stderr(line)
 
