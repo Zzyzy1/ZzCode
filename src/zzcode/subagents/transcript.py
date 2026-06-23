@@ -28,7 +28,7 @@ class SidechainTranscriptRecorder:
 
         return self.record("assistant", text=text)
 
-    def record_tool_use(self, tool_name: str, tool_input: str) -> dict[str, object]:
+    def record_tool_use(self, tool_name: str, tool_input: object) -> dict[str, object]:
         """记录子 Agent 的一次工具调用。"""
 
         return self.record("tool_use", toolName=tool_name, input=tool_input)

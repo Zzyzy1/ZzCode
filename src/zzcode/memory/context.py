@@ -45,7 +45,7 @@ def build_memory_context(
     """加载指令记忆并合并当前短期会话历史。
 
     project_root 是项目根目录；session_history 是当前后端进程内的短期历史；
-    返回可直接传入 TextReActAgent.run(session_context=...) 的上下文对象。
+    返回可直接传入结构化 Agent run(session_context=...) 的上下文对象。
     """
 
     memories = load_instruction_memories(project_root, home=home)

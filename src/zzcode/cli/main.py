@@ -9,9 +9,11 @@ from zzcode.agent.context_budget import max_turns_from_env
 from zzcode.agent.tool_call_agent import ToolCallAgent
 from zzcode.cli.ui import create_ui
 from zzcode.llm.client import ZzCodeLLM
+from zzcode.memory import create_session_scope
 from zzcode.mcp import McpConfigError, McpManager
 from zzcode.tools.base import ToolPermissionRequest, ToolPermissionResult
 from zzcode.tools.builtin import build_tool_registry as build_structured_tool_registry
+from zzcode.tools.local.agent import AgentTool
 from zzcode.tools.registry import ToolRegistry
 
 
@@ -34,6 +36,17 @@ def main() -> int:
         reporter=lambda level, message: getattr(ui, level)(message),
     )
     tools = build_tool_registry(project_root, mcp_manager=mcp_manager)
+    session_scope = create_session_scope(project_root)
+    tools.register(
+        AgentTool(
+            project_root=project_root,
+            llm_client=llm,
+            session_scope=session_scope,
+            base_registry=tools,
+            permission_checker=_request_cli_permission,
+            session_context_provider=lambda: "",
+        )
+    )
     ui.banner(model=llm.model or "(unknown)", tools=tools)
     agent = ToolCallAgent(
         llm_client=llm,

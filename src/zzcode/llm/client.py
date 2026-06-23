@@ -1,4 +1,4 @@
-"""OpenAI-compatible LLM client used by the text ReAct demo."""
+"""OpenAI-compatible LLM client used by structured tool-call agents."""
 
 from __future__ import annotations
 
@@ -37,17 +37,6 @@ class LLMResponse:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-class ThinkClient(Protocol):
-    """文本 ReAct Agent 依赖的最小模型协议。"""
-
-    def think(self, messages: list[dict[str, str]], temperature: float = 0) -> str | None:
-        """请求模型生成文本。
-
-        messages 是 OpenAI-compatible 消息列表；temperature 控制随机性；
-        返回模型文本，失败时返回 None。
-        """
-
-
 class ChatClient(Protocol):
     """结构化 tool call Agent 依赖的模型协议。"""
 
@@ -63,7 +52,7 @@ class ChatClient(Protocol):
 class ZzCodeLLM:
     """OpenAI-compatible LLM 客户端。
 
-    从参数或环境变量读取模型配置；think() 返回模型完整文本。
+    从参数或环境变量读取模型配置；chat() 返回标准化 assistant message。
     """
 
     def __init__(
@@ -87,16 +76,6 @@ class ZzCodeLLM:
                 "LLM_MODEL_ID/LLM_API_KEY/LLM_BASE_URL or "
                 "ZZCODE_MODEL/ZZCODE_API_KEY/ZZCODE_BASE_URL must be configured."
             )
-
-    def think(self, messages: list[dict[str, str]], temperature: float = 0) -> str | None:
-        """调用 Chat Completions 接口并返回纯文本。
-
-        messages 是模型上下文；temperature 传给模型服务；
-        返回 assistant 文本，HTTP 或网络失败时返回 None。
-        """
-
-        response = self.chat(messages, temperature=temperature)
-        return response.content if response is not None else None
 
     def chat(
         self,

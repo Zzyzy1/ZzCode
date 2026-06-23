@@ -27,6 +27,7 @@ from zzcode.protocol.events import JsonLineEventWriter, JsonLineRenderer
 from zzcode.subagents import SystemAgentScheduler, SystemAgentScheduleResult, SystemAgentSchedulerResult
 from zzcode.tools.base import ToolPermissionRequest, ToolPermissionResult
 from zzcode.tools.builtin import WRITE_FILE_SEPARATOR
+from zzcode.tools.local.agent import AgentTool
 from zzcode.tools.safety import resolve_project_path
 
 
@@ -89,6 +90,21 @@ def main(argv: list[str] | None = None) -> int:
         llm_client=llm,
     )
     tools = build_tool_registry(project_root, mcp_manager=mcp_manager)
+    tools.register(
+        AgentTool(
+            project_root=project_root,
+            llm_client=llm,
+            session_scope=session_scope,
+            base_registry=tools,
+            permission_checker=permission_bridge.request_structured_permission,
+            session_context_provider=lambda: build_memory_context(
+                project_root,
+                session_memory.as_list(),
+                compact_summary=session_memory.compact_summary(),
+                current_session=session_scope,
+            ).text,
+        )
+    )
     log_debug(
         f"tool registry ready tool_count={len(tools.to_openai_tools())}",
         level="info",

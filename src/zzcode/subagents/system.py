@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from zzcode.llm.client import ThinkClient
+from zzcode.llm.client import ChatClient
 from zzcode.logging import log_debug
 from zzcode.memory.auto import (
     ensure_auto_memory,
@@ -23,17 +23,38 @@ from zzcode.memory.auto import (
     scan_auto_memory_files,
 )
 from zzcode.memory.session_scope import SessionScope
-from zzcode.tools.builtin import register_builtin_tools
-from zzcode.tools.executor import ToolExecutor
+from zzcode.tools.builtin import build_tool_registry
 
-from .forked_runner import ForkedAgentRunner, ForkedAgentResult
-from .restricted_tool_executor import RestrictedToolExecutor
+from .restricted_tool_registry import build_restricted_tool_registry
+from .structured_runner import StructuredSubagentRunner, allow_system_tool
 
 
 SESSION_MEMORY_STATE_FILE = "session-memory-state.json"
 SESSION_MEMORY_AGENT_NAME = "session-memory-updater"
 AUTO_MEMORY_STATE_FILE = "auto-memory-state.json"
 AUTO_MEMORY_AGENT_NAME = "auto-memory-extraction"
+
+SESSION_MEMORY_SYSTEM_PROMPT = """
+你是 ZzCode 的系统 Session Memory Updater。
+
+职责：
+1. 根据主会话 transcript 增量维护当前 session 的 summary.md。
+2. 只更新当前 session memory 文件，不写长期 memory。
+3. 需要读写文件时必须使用结构化工具调用。
+4. 不要输出 Thought/Action、ToolName[input] 或 Finish[...] 文本协议。
+5. 完成后直接给出简短最终回答。
+""".strip()
+
+AUTO_MEMORY_SYSTEM_PROMPT = """
+你是 ZzCode 的系统 Auto Memory Extraction Worker。
+
+职责：
+1. 从主会话 transcript 增量中提取值得长期保留的用户偏好、项目事实、反馈和参考信息。
+2. 不保存短期执行步骤、临时调试输出、普通命令结果或只属于当前轮的计划。
+3. 需要读写文件时必须使用结构化工具调用。
+4. 不要输出 Thought/Action、ToolName[input] 或 Finish[...] 文本协议。
+5. 如果没有值得保存的长期记忆，直接最终回答 no durable memory。
+""".strip()
 
 
 @dataclass(frozen=True)
@@ -88,7 +109,7 @@ class SystemAgentScheduler:
         *,
         project_root: Path,
         parent_scope: SessionScope,
-        llm_client: ThinkClient,
+        llm_client: ChatClient,
         max_steps: int = 5,
     ) -> None:
         self.project_root = project_root.resolve()
@@ -267,7 +288,7 @@ class SessionMemoryUpdateWorker:
         *,
         project_root: Path,
         parent_scope: SessionScope,
-        llm_client: ThinkClient,
+        llm_client: ChatClient,
         max_steps: int = 5,
     ) -> None:
         self.project_root = project_root.resolve()
@@ -293,16 +314,19 @@ class SessionMemoryUpdateWorker:
             )
 
         prompt = self._build_prompt(new_events, force=force)
-        runner = ForkedAgentRunner(
+        runner = StructuredSubagentRunner(
             llm_client=self.llm_client,
             parent_scope=self.parent_scope,
-            tool_executor=self._build_tool_executor(),
+            project_root=self.project_root,
         )
         result = runner.run(
             name=SESSION_MEMORY_AGENT_NAME,
             prompt=prompt,
             description="Update current session memory summary.",
-            max_steps=self.max_steps,
+            system_prompt=SESSION_MEMORY_SYSTEM_PROMPT,
+            tool_registry=self._build_tool_registry(),
+            max_turns=self.max_steps,
+            permission_checker=allow_system_tool,
         )
         if not result.ok:
             return SessionMemoryUpdateResult(
@@ -324,11 +348,9 @@ class SessionMemoryUpdateWorker:
             transcript_path=result.transcript_path,
         )
 
-    def _build_tool_executor(self) -> RestrictedToolExecutor:
-        base_tools = ToolExecutor()
-        register_builtin_tools(base_tools, self.project_root)
-        return RestrictedToolExecutor(
-            base_tools,
+    def _build_tool_registry(self):
+        return build_restricted_tool_registry(
+            build_tool_registry(self.project_root),
             project_root=self.project_root,
             allow_tools={"read_file", "write_file", "edit_file", "append_file"},
             allow_read_paths=[
@@ -351,6 +373,8 @@ class SessionMemoryUpdateWorker:
                 "只允许更新当前 session-memory/summary.md，不要写长期 memory。",
                 "优先使用 read_file 查看 summary.md，再用 edit_file 或 write_file 更新它。",
                 "summary.md 应保持结构化、简洁，保留当前任务、关键文件、下一步和已完成事项。",
+                "必须使用结构化工具调用，不要输出 Thought/Action 或 Finish[...] 文本协议。",
+                "如果无需修改，直接给出最终回答说明 skipped。",
                 "",
                 f"Force update: {force_text}",
                 f"Summary path: {self._relative_path(self.parent_scope.session_memory_path)}",
@@ -362,7 +386,7 @@ class SessionMemoryUpdateWorker:
                 "New transcript events:",
                 transcript_excerpt or "(no new events)",
                 "",
-                "完成更新后，用 Finish[...] 简短说明更新结果。",
+                "完成更新后，直接用最终回答简短说明更新结果。",
             ]
         )
 
@@ -390,7 +414,7 @@ class AutoMemoryExtractionWorker:
         *,
         project_root: Path,
         parent_scope: SessionScope,
-        llm_client: ThinkClient,
+        llm_client: ChatClient,
         max_steps: int = 5,
     ) -> None:
         self.project_root = project_root.resolve()
@@ -432,16 +456,19 @@ class AutoMemoryExtractionWorker:
             )
 
         prompt = self._build_prompt(new_events)
-        runner = ForkedAgentRunner(
+        runner = StructuredSubagentRunner(
             llm_client=self.llm_client,
             parent_scope=self.parent_scope,
-            tool_executor=self._build_tool_executor(),
+            project_root=self.project_root,
         )
         result = runner.run(
             name=AUTO_MEMORY_AGENT_NAME,
             prompt=prompt,
             description="Extract durable auto memory from transcript.",
-            max_steps=self.max_steps,
+            system_prompt=AUTO_MEMORY_SYSTEM_PROMPT,
+            tool_registry=self._build_tool_registry(),
+            max_turns=self.max_steps,
+            permission_checker=allow_system_tool,
         )
         if not result.ok:
             return AutoMemoryExtractionResult(
@@ -465,14 +492,12 @@ class AutoMemoryExtractionWorker:
             transcript_path=result.transcript_path,
         )
 
-    def _build_tool_executor(self) -> RestrictedToolExecutor:
-        base_tools = ToolExecutor()
-        register_builtin_tools(base_tools, self.project_root)
+    def _build_tool_registry(self):
         memory_dir = get_auto_memory_dir(self.project_root)
-        return RestrictedToolExecutor(
-            base_tools,
+        return build_restricted_tool_registry(
+            build_tool_registry(self.project_root),
             project_root=self.project_root,
-            allow_tools={"list_files", "read_file", "write_file", "edit_file", "append_file"},
+            allow_tools={"list_files", "glob", "grep", "read_file", "write_file", "edit_file", "append_file"},
             allow_read_paths=None,
             allow_write_paths=[memory_dir],
         )
@@ -488,8 +513,10 @@ class AutoMemoryExtractionWorker:
                 "不要保存短期执行步骤、临时调试输出、普通命令结果或只属于当前轮的计划。",
                 "详细记忆必须写入 `.zzcode/memory/user/`、`.zzcode/memory/project/`、`.zzcode/memory/feedback/` 或 `.zzcode/memory/reference/` 下的 Markdown 文件。",
                 "每个详细文件建议带 frontmatter：type 和 description。",
-                "写入详细文件后，必须更新 `.zzcode/memory/MEMORY.md` 索引；如果没有值得保存的长期记忆，直接 Finish[no durable memory]。",
+                "写入详细文件后，必须更新 `.zzcode/memory/MEMORY.md` 索引；如果没有值得保存的长期记忆，直接最终回答 no durable memory。",
                 "优先根据 manifest 更新已有文件，避免重复创建同义记忆。",
+                "必须使用结构化工具调用，不要输出 Thought/Action 或 Finish[...] 文本协议。",
+                "如果没有值得保存的长期记忆，直接给出最终回答 no durable memory。",
                 "",
                 f"Memory index path: {self._relative_path(get_auto_memory_index_path(self.project_root))}",
                 "",
@@ -502,7 +529,7 @@ class AutoMemoryExtractionWorker:
                 "New transcript events:",
                 transcript_excerpt or "(no new events)",
                 "",
-                "完成后用 Finish[...] 简短说明写入或跳过结果。",
+                "完成后直接用最终回答简短说明写入或跳过结果。",
             ]
         )
 
