@@ -25,6 +25,21 @@ export function MessageRow({ message, toolOutputById }: Props) {
     return <Text color={defaultTheme.user}>› {message.text}</Text>;
   }
 
+  // assistant_delta：流式增量文本，边生成边渲染
+  if (message.type === "assistant_delta") {
+    return (
+      <Box flexDirection="column">
+        <Text>
+          <Text color={defaultTheme.accent}>⟳</Text>{" "}
+          <Text color={defaultTheme.muted}>Streaming...</Text>
+        </Text>
+        <Box paddingLeft={2}>
+          <MarkdownMessage text={message.text} />
+        </Box>
+      </Box>
+    );
+  }
+
   if (message.type === "assistant_thought") {
     return (
       <Box flexDirection="column">
@@ -85,6 +100,70 @@ export function MessageRow({ message, toolOutputById }: Props) {
         <Box paddingLeft={2}>
           <MarkdownMessage text={message.text} />
         </Box>
+      </Box>
+    );
+  }
+
+  // ---- subagent 事件 ----
+
+  if (message.type === "subagent_start") {
+    return (
+      <Box flexDirection="column">
+        <Text>
+          <Text color={defaultTheme.accent}>⟳</Text>{" "}
+          <Text color={defaultTheme.accent}>Subagent</Text>
+          <Text color={defaultTheme.muted}>: {message.name}</Text>
+        </Text>
+        {message.description ? (
+          <Box paddingLeft={2}>
+            <Text color={defaultTheme.muted}>{message.description}</Text>
+          </Box>
+        ) : null}
+      </Box>
+    );
+  }
+
+  if (message.type === "subagent_tool_use") {
+    const result = toolOutputById.get(message.id);
+    const output =
+      result?.type === "subagent_tool_result" ? result.output : undefined;
+    const ok =
+      result?.type === "subagent_tool_result" ? result.ok : true;
+    return (
+      <Box flexDirection="column" paddingLeft={2}>
+        <ToolBlock
+          name={`[sub] ${message.name}`}
+          displayName={message.displayName}
+          input={message.input}
+          output={output}
+          ok={ok}
+          source={message.source}
+        />
+      </Box>
+    );
+  }
+
+  if (message.type === "subagent_tool_result") {
+    return null;
+  }
+
+  if (message.type === "subagent_done") {
+    return (
+      <Box flexDirection="column">
+        <Text>
+          <Text color={message.ok ? defaultTheme.success : defaultTheme.danger}>
+            {message.ok ? "✓" : "✗"}
+          </Text>{" "}
+          <Text color={defaultTheme.muted}>
+            Subagent {message.name} {message.ok ? "completed" : "failed"}
+            {message.transcriptPath ? ` (transcript: ${message.transcriptPath})` : ""}
+          </Text>
+        </Text>
+        {message.error ? (
+          <Box paddingLeft={2}>
+            <Text color={defaultTheme.danger}>{message.error}</Text>
+          </Box>
+        ) : null}
       </Box>
     );
   }

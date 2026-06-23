@@ -132,6 +132,7 @@ export function PromptInput({ disabled, onSubmit, onExit }: Props) {
             cursorOffset={cursor}
             onChangeCursorOffset={setCursor}
             multiline
+            maxVisibleLines={10}
             focus
             showCursor
           />

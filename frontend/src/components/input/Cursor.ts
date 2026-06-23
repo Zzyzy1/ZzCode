@@ -156,22 +156,70 @@ export class Cursor {
   }
 
   renderLines(maxVisibleLines?: number): InputRenderLine[] {
+    return this._render(maxVisibleLines);
+  }
+
+  /**
+   * 参考 Claude 的 Cursor.render()：用列宽遍历确定每行光标位置。
+   *
+   * cursorChar 是光标占位字符（有光标时通常是 ' '，无光标时是 ''）。
+   * maxVisibleLines 是最大可见行数，超出后启用 viewport 滚动。
+   * 返回每行的 before / cursorChar / after 数据，用于 BaseTextInput 逐行渲染。
+   */
+  render(cursorChar: string, maxVisibleLines?: number): InputRenderLine[] {
+    return this._render(maxVisibleLines, cursorChar);
+  }
+
+  private _render(maxVisibleLines?: number, cursorChar?: string): InputRenderLine[] {
     const currentIndex = this.getCurrentLineIndex();
+    const { column: cursorColumn } = this.getPosition();
     const start = this.getViewportStartLine(maxVisibleLines);
     const end = maxVisibleLines ? Math.min(this.lines.length, start + maxVisibleLines) : this.lines.length;
-    return this.lines.slice(start, end).map((line, index) => {
+
+    return this.lines.slice(start, end).map((wrappedLine, index) => {
       const lineIndex = start + index;
       const hasCursor = lineIndex === currentIndex;
-      const before = hasCursor ? this.text.slice(line.start, this.offset) : line.text;
-      const cursorChar = hasCursor ? (this.text.slice(this.offset, nextOffset(this.graphemes, this.offset)) || " ") : "";
-      const after = hasCursor
-        ? this.text.slice(cursorChar === " " ? this.offset : this.offset + cursorChar.length, line.end)
-        : "";
+
+      if (!hasCursor) {
+        return {
+          before: wrappedLine.text || " ",
+          cursorChar: "",
+          after: "",
+          hasCursor: false,
+        };
+      }
+
+      // 列宽遍历定位光标（参考 Claude Code）：对当前行逐 grapheme 累加
+      // stringWidth，找到刚好跨过 cursorColumn 的 grapheme 作为光标字符。
+      // 这与旧的 offset-based slice 不同，能正确处理 CJK、emoji 和折行边界。
+      let beforeCursor = "";
+      let atCursor = cursorChar ?? " ";
+      let afterCursor = "";
+      let currentWidth = 0;
+      let cursorFound = false;
+
+      for (const { segment } of segmenter.segment(wrappedLine.text)) {
+        if (cursorFound) {
+          afterCursor += segment;
+          continue;
+        }
+        const segWidth = segment === "\n" ? 0 : Math.max(1, stringWidth(segment));
+        const nextWidth = currentWidth + segWidth;
+        if (nextWidth > cursorColumn) {
+          atCursor = segment;
+          cursorFound = true;
+        } else {
+          currentWidth = nextWidth;
+          beforeCursor += segment;
+        }
+      }
+
+      // 光标在行尾时 atCursor 保持为 cursorChar（默认是空格），会被 inverse 渲染
       return {
-        before: before || (!hasCursor && line.text.length === 0 ? " " : before),
-        cursorChar,
-        after,
-        hasCursor,
+        before: beforeCursor,
+        cursorChar: atCursor,
+        after: afterCursor,
+        hasCursor: true,
       };
     });
   }

@@ -21,6 +21,7 @@ export type BaseTextInputProps = {
   readonly focus?: boolean;
   readonly multiline?: boolean;
   readonly showCursor?: boolean;
+  readonly maxVisibleLines?: number;
   readonly onPaste?: (text: string) => void;
   readonly onIsPastingChange?: (isPasting: boolean) => void;
   readonly disableCursorMovementForUpDownKeys?: boolean;
@@ -28,7 +29,7 @@ export type BaseTextInputProps = {
 
 export type BaseInputState = {
   onInput: (input: string, key: import("ink").Key) => void;
-  lines: InputRenderLine[];
+  renderedLines: InputRenderLine[];
   cursorLine: number;
   cursorColumn: number;
   viewportCharOffset: number;

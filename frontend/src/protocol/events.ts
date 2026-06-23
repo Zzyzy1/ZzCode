@@ -1,17 +1,27 @@
 export type AgentEvent =
   | UserMessageEvent
+  | AssistantDeltaEvent
   | AssistantThoughtEvent
   | ToolUseEvent
   | ToolResultEvent
   | AssistantFinalEvent
   | SystemNoticeEvent
   | PermissionRequestEvent
-  | RequestDoneEvent;
+  | RequestDoneEvent
+  | SubagentStartEvent
+  | SubagentToolUseEvent
+  | SubagentToolResultEvent
+  | SubagentDoneEvent;
 
 export type NoticeLevel = "info" | "warning" | "error";
 
 export type UserMessageEvent = {
   type: "user_message";
+  text: string;
+};
+
+export type AssistantDeltaEvent = {
+  type: "assistant_delta";
   text: string;
 };
 
@@ -96,6 +106,46 @@ export type WriteFileDiffPreview = {
 export type DiffPreviewLine = {
   kind: "header" | "context" | "add" | "remove";
   text: string;
+};
+
+export type SubagentStartEvent = {
+  type: "subagent_start";
+  agentId: string;
+  name: string;
+  description?: string | null;
+  transcriptPath?: string | null;
+};
+
+export type SubagentToolUseEvent = {
+  type: "subagent_tool_use";
+  agentId: string;
+  id: string;
+  name: string;
+  displayName?: string;
+  input: unknown;
+  source?: string;
+  mcpInfo?: McpInfo | null;
+};
+
+export type SubagentToolResultEvent = {
+  type: "subagent_tool_result";
+  agentId: string;
+  id: string;
+  name: string;
+  ok: boolean;
+  output: string;
+  outputPreview?: string;
+  source?: string;
+  mcpInfo?: McpInfo | null;
+};
+
+export type SubagentDoneEvent = {
+  type: "subagent_done";
+  agentId: string;
+  name: string;
+  ok: boolean;
+  transcriptPath?: string | null;
+  error?: string | null;
 };
 
 export type AgentStatus = "idle" | "thinking" | "running_tool" | "done";

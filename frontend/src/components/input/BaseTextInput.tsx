@@ -1,4 +1,4 @@
-import React, { Fragment } from "react";
+import React from "react";
 import { Box, Text, useInput } from "ink";
 import { usePasteHandler } from "./usePasteHandler.js";
 import type { BaseInputState, BaseTextInputProps } from "./textInputTypes.js";
@@ -8,7 +8,8 @@ type Props = BaseTextInputProps & {
 };
 
 /**
- * 参考 Claude 的 BaseTextInput：只渲染连续文本块，不自己做布局。
+ * 参考 Claude 的 BaseTextInput：每行独立 `<Text>` 渲染，避免 \n 拼接导致
+ * Ink 二次折行。光标字符通过 `<Text inverse>` 高亮。
  */
 export function BaseTextInput({ inputState, ...props }: Props) {
   const { wrappedOnInput, isPasting } = usePasteHandler({
@@ -29,19 +30,21 @@ export function BaseTextInput({ inputState, ...props }: Props) {
 
   useInput(wrappedOnInput, { isActive: props.focus ?? true });
 
+  const showCursor = props.showCursor ?? true;
+
   return (
-    <Box>
-      <Text>
-        {inputState.lines.map((line, index) => (
-          <Fragment key={index}>
-            {index > 0 ? "\n" : null}
-            {line.before}
-            {line.hasCursor && (props.showCursor ?? true) ? <Text inverse>{line.cursorChar}</Text> : line.hasCursor ? line.cursorChar : null}
-            {line.after}
-          </Fragment>
-        ))}
-      </Text>
+    <Box flexDirection="column">
+      {inputState.renderedLines.map((line, index) => (
+        <Text key={index}>
+          {line.before}
+          {line.hasCursor && showCursor ? (
+            <Text inverse>{line.cursorChar}</Text>
+          ) : (
+            line.cursorChar
+          )}
+          {line.after}
+        </Text>
+      ))}
     </Box>
   );
 }
-

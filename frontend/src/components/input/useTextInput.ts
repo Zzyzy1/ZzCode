@@ -12,6 +12,8 @@ export function useTextInput(props: BaseTextInputProps): BaseInputState {
     [props.columns, props.cursorOffset, props.value],
   );
 
+  const cursorChar = props.showCursor ? " " : "";
+
   const commitCursor = React.useCallback((next: Cursor) => {
     if (next.text !== props.value) {
       props.onChange(next.text);
@@ -131,7 +133,7 @@ export function useTextInput(props: BaseTextInputProps): BaseInputState {
   const position = cursor.getPosition();
   return {
     onInput,
-    lines: cursor.renderLines(),
+    renderedLines: cursor.render(cursorChar, props.maxVisibleLines),
     cursorLine: position.line,
     cursorColumn: position.column,
     viewportCharOffset: cursor.getViewportCharOffset(),

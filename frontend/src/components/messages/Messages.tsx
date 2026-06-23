@@ -18,8 +18,9 @@ export function Messages({ messages }: Props) {
   const visibleMessages = buildVisibleMessages(messages);
 
   // 工具结果不单独成行，而是合并到对应 tool_use 中，这更接近 Claude 的阅读节奏。
+  // subagent_tool_result 也通过 id 合并到对应的 subagent_tool_use。
   for (const message of messages) {
-    if (message.type === "tool_result") {
+    if (message.type === "tool_result" || message.type === "subagent_tool_result") {
       toolOutputById.set(message.id, message);
     }
   }
@@ -44,7 +45,7 @@ function buildVisibleMessages(messages: MessageNode[]): Array<MessageNode | Coll
   let groupCreatedAt = 0;
 
   for (const message of messages) {
-    if (message.type === "tool_result" || message.type === "request_done") {
+    if (message.type === "tool_result" || message.type === "subagent_tool_result" || message.type === "request_done") {
       continue;
     }
 

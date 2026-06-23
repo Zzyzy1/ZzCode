@@ -1,92 +1,120 @@
 # ZzCode
 
-ZzCode 是一个用于学习现代 Code Agent 工作机制的 Python + React Ink 终端编程助手。
+A terminal Code Agent CLI built with **Python + React Ink**, designed for learning how modern AI coding assistants work under the hood.
 
-它不是为了直接复刻完整的 Claude Code，而是从一个可运行、可调试、可逐步扩展的最小 Agent 开始，分阶段理解终端智能体中的结构化工具调用、权限确认、上下文记忆、前后端协议和 TUI 交互。
+ZzCode is not a clone of Claude Code. It's a **from-scratch, incrementally built** agent — starting from a minimal runnable loop and progressively adding structured tool calling, permission checks, memory, subagents, MCP integration, and streaming output. Each phase is documented so you can trace the design decisions.
 
 ![ZzCode terminal UI](docs/img/1.png)
 
-## Overview
+## Features
 
-ZzCode 当前的核心形态是一个本地 Code Agent CLI：
+- **Structured tool-call agent loop** — OpenAI-compatible `tool_calls` with `ToolRegistry` + `ToolRunner`
+- **Streaming output** — real-time `assistant_delta` text streaming with proper frontend delta merging
+- **React + Ink terminal UI** — multiline input with column-aware cursor, per-line rendering, and viewport scrolling
+- **Permission system** — tool execution requires user confirmation; destructive tools are always confirmed
+- **Markdown memory files** — Claude Code-style `.zzcode/memory/` directory with auto-extraction
+- **Short-term session memory** — compact/trim/auto-summarize with context budget awareness
+- **Subagents** — user-callable (`general-purpose`) and system workers (memory update, auto-extraction)
+- **MCP stdio support** — MCP servers as structured tool sources via `.zzcode/mcp.json`
+- **JSON Lines protocol** — clean frontend/backend separation, easy to debug and extend
+- **Collapsible tool groups** — consecutive `read_file`/`glob`/`grep` calls folded into summaries
 
-```text
-Terminal UI
-  -> JSON Lines Protocol
-  -> Python Agent Core
-  -> LLM Provider
-  -> Structured Tool Registry
-  -> Local Tool Runner
+## Quick Start
+
+### Prerequisites
+
+- Python 3.11+
+- Node.js 18+
+- An OpenAI-compatible LLM endpoint (API key, base URL, model ID)
+
+### Setup
+
+```bash
+# Clone and install
+git clone <repo-url>
+cd ZzCode
+
+# Configure LLM (create .env or export env vars)
+export LLM_MODEL_ID="your-model"
+export LLM_API_KEY="your-api-key"
+export LLM_BASE_URL="https://your-endpoint/v1"
+
+# Optional: enable streaming (default: on)
+export ZZCODE_STREAM=1
+
+# Optional: show debug logs in stderr
+export ZZCODE_DEBUG_TO_STDERR=1
 ```
 
-前端负责终端交互和消息展示，后端负责 OpenAI-compatible `tool_calls` 主循环、模型调用、工具执行、权限确认、上下文管理和子 Agent 调度。两侧通过事件协议通信，便于后续继续扩展 Plan Mode、MCP 和更完整的多 Agent 能力。
+### Run
 
-## Capabilities
-
-- OpenAI-compatible 结构化 tool call Agent 主循环
-- OpenAI-compatible LLM 接入
-- 本地文件、搜索和命令工具
-- `glob` / `grep` 项目内文件定位和内容搜索
-- React + Ink 终端 UI
-- JSON Lines 前后端通信
-- 工具执行前权限确认
-- 用户拒绝破坏性工具后停止当前 turn，避免换工具绕过拒绝
-- 多行输入和历史输入
-- Markdown 风格记忆文件
-- 当前会话短期记忆
-- Session notes 和基础 Compact 支持
-- 用户可调用 Subagents
-- 系统 Subagents，用于 session memory 更新和 auto memory 提取
-- MCP stdio server 接入，作为结构化工具来源
+```bash
+# Start the terminal UI
+cd frontend && npm install && npm run build && npm start
+```
 
 ## Architecture
 
-```text
+```
+Terminal UI (React + Ink)
+  → JSON Lines Protocol (stdin/stdout)
+  → Python Agent Core (ToolCallAgent)
+  → LLM Provider (OpenAI-compatible, streaming SSE)
+  → Structured Tool Registry + Runner
+  → Local Tools, MCP Tools, Subagents
+```
+
+### Project Structure
+
+```
 ZzCode/
-├── frontend/          React + Ink terminal UI
-├── src/zzcode/        Python Agent core
-│   ├── agent/         structured tool-call loop
-│   ├── llm/           model provider adapter
-│   ├── legacy/        temporary text ReAct compatibility
-│   ├── memory/        markdown memory and context
-│   ├── mcp/           MCP config, stdio connection and tool/resource adapters
-│   ├── protocol/      JSON Lines backend
-│   ├── subagents/     user and system subagents
-│   └── tools/         structured local tool runtime
-├── docs/              phase notes and design records
-└── tests/             focused behavior tests
+├── frontend/                    React + Ink terminal UI
+│   └── src/
+│       ├── protocol/            event types, Python agent bridge
+│       ├── screens/             REPL state reducer
+│       ├── components/
+│       │   ├── input/           BaseTextInput, Cursor, useTextInput
+│       │   ├── messages/        MessageRow, MarkdownMessage, CollapsedToolGroup
+│       │   ├── prompt/          PromptInput (history, undo, multiline)
+│       │   └── tools/           ToolBlock, ToolResultView
+│       └── app/                 theme, App root
+├── src/zzcode/                  Python agent core
+│   ├── agent/                   ToolCallAgent, context budget
+│   ├── llm/                     OpenAI-compatible client (chat + stream)
+│   ├── memory/                  markdown memory, session scope
+│   ├── mcp/                     MCP config, stdio connection
+│   ├── protocol/                JSON Lines server, event writer
+│   ├── subagents/               structured runner, restricted tools
+│   ├── tools/                   registry, runner, builtins, safety
+│   └── ui/                      message types, renderer
+├── docs/                        Phase design notes and references
+├── tests/                       Focused behavior tests
+└── .zzcode/                     Session data, memory, MCP config
 ```
 
 ## Learning Roadmap
 
-ZzCode 按阶段推进，每个阶段都优先让核心机制清晰可见：
+ZzCode is built in phases. Each phase adds one capability, and the design decisions are documented.
 
-1. ReAct + Tool Call 最小闭环
-2. React + Ink 终端 UI 和 JSON Lines 协议
-3. 工具权限确认和文件变更预览
-4. Claude Code 风格 Markdown Memory
-5. Session notes 和基础 Compact
-6. Claude Code 风格 Subagents
-7. Claude Code 风格结构化工具层
-8. Plan Mode
-9. MCP 接入
+| Phase | Topic | Key Files |
+|-------|-------|-----------|
+| 1 | ReAct + Tool Call minimal loop | `docs/phase-01-react-toolcall-demo.md` |
+| 2 | Memory system (markdown, session) | `docs/phase-02-memory-system.md` |
+| 3 | Subagents (user + system) | `docs/phase-03-subagents.md` |
+| 4 | Structured tool layer | `docs/phase-04-tools-layer.md` |
+| 5 | MCP integration (stdio transport) | `docs/phase-05-mcp-layer.md` |
+| 8 | Structured subagents + streaming | `docs/phase-08-structured-subagents.md` |
 
-当前主链路已经切换到结构化 `ToolCallAgent`。早期文本 ReAct 实现仍保留在 legacy 边界中，主要用于阶段回顾和部分 subagents 临时兼容。
+> Phases 6–7 were absorbed into the Phase 03 and Phase 04 work streams. Phase 8 is the current milestone.
 
-## MCP First Version
+## MCP Configuration
 
-ZzCode 当前支持项目级 MCP 配置文件：
-
-```text
-.zzcode/mcp.json
-```
-
-配置结构：
+Place a `.zzcode/mcp.json` in your project root:
 
 ```json
 {
   "mcpServers": {
-    "demo": {
+    "my-server": {
       "type": "stdio",
       "command": "python3",
       "args": ["server.py"],
@@ -98,26 +126,51 @@ ZzCode 当前支持项目级 MCP 配置文件：
 }
 ```
 
-第一版限制：
+MCP tools appear in the tool registry as `mcp__<server>__<tool>` and follow the same permission flow as built-in tools.
 
-- 只支持 `stdio` transport。
-- 只读取当前项目的 `.zzcode/mcp.json`，不向父目录扫描，也不读取 Claude Code 的 `.mcp.json`。
-- MCP tools 会作为普通结构化工具进入 `ToolRegistry`，名称格式为 `mcp__server__tool`。
-- MCP tool 默认需要权限确认；权限请求使用完整 MCP 工具名。
-- MCP resources 只能通过 `list_mcp_resources` 和 `read_mcp_resource` 显式访问。
-- resource 读取必须提供 `server` 和 `uri`；URI 不存在时只返回 MCP server 错误，不退化为本地 `glob`、`grep`、`find_file` 或 shell 搜索。
-- binary/blob resource 当前不会以 base64 直接进入上下文，会返回明确的不支持结果。
+### Current MCP Limitations
+
+- `stdio` transport only (no SSE/HTTP)
+- Project-local `.zzcode/mcp.json` only (no parent directory scanning)
+- MCP resources accessible via explicit `list_mcp_resources` / `read_mcp_resource` calls
+- Binary/blob resources not yet supported
+
+## Input System
+
+ZzCode's input system follows Claude Code's design:
+
+- **Column-aware cursor** — cursor position based on visual column width (`stringWidth`), not character offset, correctly handling CJK characters and emoji
+- **Per-line rendering** — each visual line is a separate `<Text>` element, preventing terminal double-wrapping
+- **Viewport scrolling** — multiline input capped at 10 visible lines with automatic viewport centering
+- **Keybindings** — Enter/Shift+Enter for submit/newline, Ctrl+A/E/U/K for line operations, Up/Down for history, Ctrl+_ for undo
+- **Paste detection** — heuristic-based paste accumulation (80ms window) with separate paste events
+
+## Development
+
+```bash
+# Python tests
+python -m pytest tests/ -v
+
+# Frontend dev mode (hot reload)
+cd frontend && npm run dev
+
+# Frontend type check
+cd frontend && npx tsc -p tsconfig.json --noEmit
+```
 
 ## Documentation
 
-- [AGENTS.md](AGENTS.md)：项目协作规则、架构约定和注释规范
-- [docs/phase-01-react-toolcall-demo.md](docs/phase-01-react-toolcall-demo.md)：第一阶段 ReAct + Tool Call 学习记录
-- [docs/phase-02-memory-system.md](docs/phase-02-memory-system.md)：第二阶段 Memory System 学习记录
-- [docs/phase-03-subagents.md](docs/phase-03-subagents.md)：第三阶段 Subagents 学习记录
-- [docs/phase-03-claude-subagents-reference.md](docs/phase-03-claude-subagents-reference.md)：Claude Code 子 Agent 实现参考摘录
-- [docs/phase-04-tools-layer.md](docs/phase-04-tools-layer.md)：第四阶段结构化工具层实现方案
-- [docs/phase-04-claude-tools-reference.md](docs/phase-04-claude-tools-reference.md)：第四阶段 Claude Code 工具层参考实现
-- [docs/phase-05-mcp-layer.md](docs/phase-05-mcp-layer.md)：第五阶段 MCP 工具来源接入方案
-- [docs/phase-05-claude-mcp-reference.md](docs/phase-05-claude-mcp-reference.md)：第五阶段 Claude Code MCP 实现参考
+- [AGENTS.md](AGENTS.md) — project conventions, architecture rules, and code style
+- [docs/phase-01-react-toolcall-demo.md](docs/phase-01-react-toolcall-demo.md) — Phase 1: ReAct + Tool Call
+- [docs/phase-02-memory-system.md](docs/phase-02-memory-system.md) — Phase 2: Memory System
+- [docs/phase-03-subagents.md](docs/phase-03-subagents.md) — Phase 3: Subagents
+- [docs/phase-03-claude-subagents-reference.md](docs/phase-03-claude-subagents-reference.md) — Claude Code subagent reference
+- [docs/phase-04-tools-layer.md](docs/phase-04-tools-layer.md) — Phase 4: Structured Tool Layer
+- [docs/phase-04-claude-tools-reference.md](docs/phase-04-claude-tools-reference.md) — Claude Code tool layer reference
+- [docs/phase-05-mcp-layer.md](docs/phase-05-mcp-layer.md) — Phase 5: MCP Integration
+- [docs/phase-05-claude-mcp-reference.md](docs/phase-05-claude-mcp-reference.md) — Claude Code MCP reference
+- [docs/phase-08-structured-subagents.md](docs/phase-08-structured-subagents.md) — Phase 8: Structured Subagents & Streaming
 
-README 只保留项目展示和总体框架。具体设计取舍、实现步骤、验收记录和后续 TODO 放在 `docs/` 中维护。
+## License
+
+MIT
