@@ -18,6 +18,7 @@ ZzCode 不是为了复刻 Claude Code，而是从**一个可运行的最小 Agen
 - **MCP stdio 接入** — 通过 `.zzcode/mcp.json` 将 MCP server 作为结构化工具来源
 - **JSON Lines 前后端协议** — 前后端通过 stdin/stdout JSONL 通信，解耦清晰，便于调试和扩展
 - **工具折叠展示** — 连续的 `read_file` / `glob` / `grep` 调用自动折叠为摘要，减少刷屏
+- **联网搜索与抓取** — 通过博查 API 的 `web_search` 获取实时搜索结果，`web_fetch` 抓取并提取网页文本内容
 
 ## 快速开始
 
@@ -41,6 +42,9 @@ export LLM_BASE_URL="https://your-endpoint/v1"
 
 # 可选：关闭流式输出（默认开启）
 export ZZCODE_STREAM=0
+
+# 可选：启用联网搜索（需要博查 API key）
+export BOCHA_API_KEY="your-bocha-api-key"
 
 # 可选：将 debug 日志输出到 stderr
 export ZZCODE_DEBUG_TO_STDERR=1
@@ -86,6 +90,7 @@ ZzCode/
 │   ├── protocol/                 JSON Lines server、事件写入器
 │   ├── subagents/                结构化子 Agent runner、受限工具
 │   ├── tools/                    工具注册、执行、内置工具、安全检查
+│   │   └── local/                本地工具（文件系统、搜索、Shell、web 搜索/抓取）
 │   └── ui/                       UI 消息类型、渲染器
 ├── docs/                         各阶段设计文档与参考
 ├── tests/                        行为测试

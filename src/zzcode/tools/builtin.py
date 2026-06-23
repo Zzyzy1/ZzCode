@@ -28,7 +28,7 @@ class LegacyToolRegistrar(Protocol):
 def register_builtin_structured_tools(registry: ToolRegistry) -> None:
     """注册第四阶段结构化内置工具。
 
-    registry 是结构化工具注册表；当前包含本地文件工具和 shell 工具。
+    registry 是结构化工具注册表；当前包含本地文件工具、shell 工具、web 搜索和抓取工具。
     """
 
     from .local.filesystem import (
@@ -40,6 +40,8 @@ def register_builtin_structured_tools(registry: ToolRegistry) -> None:
     )
     from .local.search import GlobTool, GrepTool
     from .local.shell import RunShellTool
+    from .local.web_fetch import WebFetchTool
+    from .local.web_search import WebSearchTool
 
     registry.register(ListFilesTool())
     registry.register(GlobTool())
@@ -49,6 +51,8 @@ def register_builtin_structured_tools(registry: ToolRegistry) -> None:
     registry.register(EditFileTool())
     registry.register(AppendFileTool())
     registry.register(RunShellTool())
+    registry.register(WebSearchTool())
+    registry.register(WebFetchTool())
 
 
 def build_tool_registry(
