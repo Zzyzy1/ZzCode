@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, TextIO
 
+from zzcode.agent.context_budget import calculate_context_budget_state, max_turns_from_env
 from zzcode.agent.tool_call_agent import ToolCallAgent
 from zzcode.cli.main import build_tool_registry, create_mcp_manager
 from zzcode.llm.client import ZzCodeLLM
@@ -98,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         llm_client=llm,
         tool_registry=tools,
         project_root=project_root,
-        max_steps=5,
+        max_turns=max_turns_from_env(),
         renderer=renderer,
         permission_checker=permission_bridge.request_structured_permission,
         transcript_sink=transcript,
@@ -199,6 +200,85 @@ def main(argv: list[str] | None = None) -> int:
         )
         if memory_context.text:
             _debug_memory(f"context {_compact_debug_text(memory_context.text, max_length=500)}")
+
+        estimated_tokens = agent.estimate_context_tokens(text, session_context=memory_context.text)
+        budget_state = calculate_context_budget_state(estimated_tokens, config=agent.context_budget)
+        log_debug(
+            "turn context budget "
+            f"estimated_tokens={budget_state.estimated_tokens} "
+            f"percent_left={budget_state.percent_left} "
+            f"auto_compact_at={budget_state.config.auto_compact_threshold} "
+            f"blocking_at={budget_state.config.blocking_threshold} "
+            f"auto_compact={budget_state.is_above_auto_compact_threshold} "
+            f"blocking={budget_state.is_at_blocking_limit}",
+            level="info",
+            component="protocol",
+        )
+        if budget_state.is_above_auto_compact_threshold:
+            compact_update = system_agents.before_compact()
+            _debug_system_agents("before budget compact", compact_update)
+            compact_result = session_memory.compact(reason="auto_context_budget")
+            _debug_memory(
+                "budget compact "
+                f"compacted={compact_result.compacted} "
+                f"reason={compact_result.reason} "
+                f"removed_items={compact_result.removed_items} "
+                f"kept_items={compact_result.kept_items} "
+                f"summary_chars={compact_result.summary_chars}"
+            )
+            if compact_result.compacted:
+                transcript.record_compact(
+                    trigger="auto_context_budget",
+                    removed_items=compact_result.removed_items,
+                    kept_items=compact_result.kept_items,
+                    summary=session_memory.compact_summary(),
+                )
+                writer.write(
+                    {
+                        "type": "system_notice",
+                        "level": "info",
+                        "text": (
+                            "上下文接近上限，已自动压缩短期会话历史："
+                            f"折叠 {compact_result.removed_items} 条，"
+                            f"保留 {compact_result.kept_items} 条。"
+                        ),
+                    }
+                )
+                memory_context = build_memory_context(
+                    project_root,
+                    session_memory.as_list(),
+                    compact_summary=session_memory.compact_summary(),
+                    current_session=session_scope,
+                )
+                estimated_tokens = agent.estimate_context_tokens(text, session_context=memory_context.text)
+                budget_state = calculate_context_budget_state(estimated_tokens, config=agent.context_budget)
+                log_debug(
+                    "turn context budget after compact "
+                    f"estimated_tokens={budget_state.estimated_tokens} "
+                    f"percent_left={budget_state.percent_left} "
+                    f"blocking={budget_state.is_at_blocking_limit}",
+                    level="info",
+                    component="protocol",
+                )
+
+        if budget_state.is_at_blocking_limit:
+            message = (
+                "上下文已经接近模型上限，已停止本轮请求。"
+                f"估算 {budget_state.estimated_tokens} tokens，"
+                f"阻断阈值 {budget_state.config.blocking_threshold} tokens。"
+                "请先 /compact 或清理会话历史后继续。"
+            )
+            writer.write({"type": "system_notice", "level": "warning", "text": message})
+            log_debug(
+                "turn blocked by context budget "
+                f"estimated_tokens={budget_state.estimated_tokens} "
+                f"blocking_at={budget_state.config.blocking_threshold}",
+                level="warn",
+                component="protocol",
+            )
+            transcript.end_turn()
+            writer.write({"type": "request_done", "ok": False})
+            continue
 
         agent_started_at = time.perf_counter()
         log_debug("agent run start", level="info", component="protocol")

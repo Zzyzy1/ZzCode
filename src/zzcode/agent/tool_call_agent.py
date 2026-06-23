@@ -7,6 +7,11 @@ import time
 from pathlib import Path
 from typing import Any, Protocol
 
+from zzcode.agent.context_budget import (
+    ContextBudgetConfig,
+    check_context_budget,
+    max_turns_from_env,
+)
 from zzcode.llm.client import ChatClient, LLMToolCall
 from zzcode.logging import log_debug
 from zzcode.tools.base import PermissionChecker, ToolCall, ToolContext
@@ -55,24 +60,29 @@ class ToolCallAgent:
         llm_client: ChatClient,
         tool_registry: ToolRegistry,
         project_root: Path,
-        max_steps: int = 5,
+        max_steps: int | None = None,
+        max_turns: int | None = None,
         renderer: object | None = None,
         permission_checker: PermissionChecker | None = None,
         transcript_sink: TranscriptSink | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         runner: ToolRunner | None = None,
         session_id: str = "",
+        context_budget: ContextBudgetConfig | None = None,
+        max_consecutive_failures: int = 3,
     ) -> None:
         self.llm_client = llm_client
         self.tool_registry = tool_registry
         self.project_root = project_root.resolve()
-        self.max_steps = max_steps
+        self.max_steps = max_turns if max_turns is not None else (max_steps if max_steps is not None else max_turns_from_env())
         self.renderer = renderer or PlainInlineRenderer()
         self.permission_checker = permission_checker
         self.transcript_sink = transcript_sink
         self.system_prompt = system_prompt
         self.runner = runner or ToolRunner(tool_registry)
         self.session_id = session_id
+        self.context_budget = context_budget or ContextBudgetConfig.from_env()
+        self.max_consecutive_failures = max_consecutive_failures
         self.messages: list[dict[str, Any]] = []
 
     def run(self, question: str, session_context: str = "") -> str | None:
@@ -80,18 +90,49 @@ class ToolCallAgent:
 
         run_started_at = time.perf_counter()
         self.messages = self._initial_messages(question, session_context)
+        tools = self.tool_registry.to_openai_tools()
+        consecutive_failures = 0
         log_debug(
             "run start "
             f"question_chars={len(question)} "
             f"session_context_chars={len(session_context)} "
             f"initial_messages={len(self.messages)} "
-            f"tools={len(self.tool_registry.to_openai_tools())}",
+            f"tools={len(tools)} "
+            f"max_turns={self.max_steps}",
             level="info",
             component="agent",
         )
 
         for step in range(1, self.max_steps + 1):
             step_started_at = time.perf_counter()
+            budget_state = check_context_budget(self.messages, tools=tools, config=self.context_budget)
+            log_debug(
+                "context budget "
+                f"step={step} "
+                f"estimated_tokens={budget_state.estimated_tokens} "
+                f"percent_left={budget_state.percent_left} "
+                f"auto_compact_at={budget_state.config.auto_compact_threshold} "
+                f"blocking_at={budget_state.config.blocking_threshold} "
+                f"blocking={budget_state.is_at_blocking_limit}",
+                level="info",
+                component="agent",
+            )
+            if budget_state.is_at_blocking_limit:
+                message = (
+                    "Stopped: context budget exceeded "
+                    f"({budget_state.estimated_tokens}/{budget_state.config.blocking_threshold} tokens)."
+                )
+                self.renderer.render(SystemNotice(message, "warning"))
+                log_debug(
+                    "run end "
+                    "reason=context_budget_exceeded "
+                    f"step={step} "
+                    f"estimated_tokens={budget_state.estimated_tokens} "
+                    f"elapsed_ms={(time.perf_counter() - run_started_at) * 1000:.1f}",
+                    level="warn",
+                    component="agent",
+                )
+                return None
             log_debug(
                 f"step start step={step} messages={len(self.messages)}",
                 level="info",
@@ -101,7 +142,7 @@ class ToolCallAgent:
             llm_started_at = time.perf_counter()
             response = self.llm_client.chat(
                 self.messages,
-                tools=self.tool_registry.to_openai_tools(),
+                tools=tools,
             )
             log_debug(
                 f"step llm returned step={step} ok={response is not None} elapsed_ms={(time.perf_counter() - llm_started_at) * 1000:.1f}",
@@ -154,19 +195,44 @@ class ToolCallAgent:
                         component="agent",
                     )
                     return None
+                if _counts_as_loop_failure(result):
+                    consecutive_failures += 1
+                else:
+                    consecutive_failures = 0
+                if consecutive_failures >= self.max_consecutive_failures:
+                    self.renderer.render(SystemNotice("Stopped: repeated tool failures.", "warning"))
+                    log_debug(
+                        "run end "
+                        "reason=repeated_tool_failures "
+                        f"step={step} "
+                        f"consecutive_failures={consecutive_failures} "
+                        f"elapsed_ms={(time.perf_counter() - run_started_at) * 1000:.1f}",
+                        level="warn",
+                        component="agent",
+                    )
+                    return None
             log_debug(
                 f"step end step={step} elapsed_ms={(time.perf_counter() - step_started_at) * 1000:.1f} messages={len(self.messages)}",
                 level="info",
                 component="agent",
             )
 
-        self.renderer.render(SystemNotice("Stopped: max steps reached.", "warning"))
+        self.renderer.render(SystemNotice(f"Stopped: maximum turns reached ({self.max_steps}).", "warning"))
         log_debug(
-            f"run end reason=max_steps elapsed_ms={(time.perf_counter() - run_started_at) * 1000:.1f}",
+            f"run end reason=max_turns max_turns={self.max_steps} elapsed_ms={(time.perf_counter() - run_started_at) * 1000:.1f}",
             level="warn",
             component="agent",
         )
         return None
+
+    def estimate_context_tokens(self, question: str, session_context: str = "") -> int:
+        """估算一次新 turn 初始上下文 token 数。"""
+
+        return check_context_budget(
+            self._initial_messages(question, session_context),
+            tools=self.tool_registry.to_openai_tools(),
+            config=self.context_budget,
+        ).estimated_tokens
 
     def _run_tool_call(self, llm_tool_call: LLMToolCall) -> StructuredToolResult:
         tool_started_at = time.perf_counter()
@@ -273,3 +339,15 @@ def _openai_tool_call(tool_call: LLMToolCall) -> dict[str, Any]:
 
 def _is_user_denied_tool_result(result: StructuredToolResult) -> bool:
     return result.metadata.get("reason") == "user_denied"
+
+
+def _counts_as_loop_failure(result: StructuredToolResult) -> bool:
+    if result.ok:
+        return False
+    return result.metadata.get("reason") in {
+        "arguments_parse_error",
+        "invalid_arguments",
+        "unknown_tool",
+        "validation_failed",
+        "tool_exception",
+    }

@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from zzcode.agent.context_budget import ContextBudgetConfig
 from zzcode.agent.tool_call_agent import ToolCallAgent
 from zzcode.llm.client import LLMResponse, LLMToolCall
 from zzcode.tools.base import BaseTool, ToolPermissionRequest, ToolPermissionResult
@@ -380,7 +381,7 @@ class ToolCallAgentTest(unittest.TestCase):
         notices = [message for message in renderer.messages if isinstance(message, SystemNotice)]
         self.assertEqual(notices[-1].level, "error")
 
-    def test_max_steps_returns_none_when_tools_never_finish(self) -> None:
+    def test_max_turns_returns_none_when_tools_never_finish(self) -> None:
         llm = FakeChatClient(
             [
                 LLMResponse(
@@ -408,6 +409,58 @@ class ToolCallAgentTest(unittest.TestCase):
         self.assertIsNone(answer)
         notices = [message for message in renderer.messages if isinstance(message, SystemNotice)]
         self.assertEqual(notices[-1].level, "warning")
+        self.assertIn("maximum turns", notices[-1].text)
+
+    def test_context_budget_blocks_before_llm_call(self) -> None:
+        renderer = CapturingRenderer()
+        llm = FakeChatClient([LLMResponse(content="should not be called")])
+        tiny_budget = ContextBudgetConfig(
+            context_window_tokens=40,
+            reserved_output_tokens=5,
+            auto_compact_buffer_tokens=10,
+            blocking_buffer_tokens=3,
+        )
+
+        with TemporaryDirectory() as tmp:
+            agent = ToolCallAgent(
+                llm,
+                _registry(ReadTool()),
+                Path(tmp),
+                renderer=renderer,
+                context_budget=tiny_budget,
+            )
+            answer = agent.run("x" * 400)
+
+        self.assertIsNone(answer)
+        self.assertEqual(len(llm.calls), 0)
+        notices = [message for message in renderer.messages if isinstance(message, SystemNotice)]
+        self.assertIn("context budget exceeded", notices[-1].text)
+
+    def test_repeated_tool_failures_stop_current_turn(self) -> None:
+        llm = FakeChatClient(
+            [
+                LLMResponse(tool_calls=[LLMToolCall(id="call_1", name="missing_tool", arguments={})], content=""),
+                LLMResponse(tool_calls=[LLMToolCall(id="call_2", name="missing_tool", arguments={})], content=""),
+                LLMResponse(tool_calls=[LLMToolCall(id="call_3", name="missing_tool", arguments={})], content=""),
+                LLMResponse(content="should not be reached"),
+            ]
+        )
+        renderer = CapturingRenderer()
+
+        with TemporaryDirectory() as tmp:
+            agent = ToolCallAgent(
+                llm,
+                _registry(ReadTool()),
+                Path(tmp),
+                max_steps=5,
+                renderer=renderer,
+            )
+            answer = agent.run("keep using missing tool")
+
+        self.assertIsNone(answer)
+        self.assertEqual(len(llm.calls), 3)
+        notices = [message for message in renderer.messages if isinstance(message, SystemNotice)]
+        self.assertIn("repeated tool failures", notices[-1].text)
 
 
 def _registry(*tools: BaseTool) -> ToolRegistry:

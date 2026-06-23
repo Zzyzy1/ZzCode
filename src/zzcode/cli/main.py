@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
+from zzcode.agent.context_budget import max_turns_from_env
 from zzcode.agent.tool_call_agent import ToolCallAgent
 from zzcode.cli.ui import create_ui
 from zzcode.llm.client import ZzCodeLLM
@@ -38,7 +39,7 @@ def main() -> int:
         llm_client=llm,
         tool_registry=tools,
         project_root=project_root,
-        max_steps=5,
+        max_turns=max_turns_from_env(),
         renderer=ui,
         permission_checker=_request_cli_permission,
     )
