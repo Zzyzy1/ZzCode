@@ -6,9 +6,14 @@ import json
 from typing import Protocol
 
 from .messages import (
+    AssistantDelta,
     AssistantThought,
     FinalAnswer,
     StepStarted,
+    SubagentDone,
+    SubagentStarted,
+    SubagentToolResult,
+    SubagentToolUse,
     SystemNotice,
     ToolResult,
     ToolUse,
@@ -38,6 +43,8 @@ class PlainInlineRenderer:
 
         if isinstance(message, StepStarted):
             print(f"\n--- Step {message.step}/{message.max_steps} ---")
+        elif isinstance(message, AssistantDelta):
+            print(message.text, end="", flush=True)
         elif isinstance(message, AssistantThought):
             print(f"● Thought\n  {message.text}")
         elif isinstance(message, ToolUse):
@@ -49,6 +56,15 @@ class PlainInlineRenderer:
             print(f"● Final\n  {message.text}")
         elif isinstance(message, SystemNotice):
             print(f"● {message.level.title()}\n  ⎿ {message.text}")
+        elif isinstance(message, SubagentStarted):
+            print(f"● Subagent {message.name} started ({message.agent_id})")
+        elif isinstance(message, SubagentToolUse):
+            print(f"  ● {message.name}({_format_tool_input(message.tool_input)})")
+        elif isinstance(message, SubagentToolResult):
+            print(f"    ⎿ {_truncate_for_terminal(message.output)}")
+        elif isinstance(message, SubagentDone):
+            status = "completed" if message.ok else "failed"
+            print(f"● Subagent {message.name} {status}: {message.transcript_path}")
 
 
 class RichInlineRenderer:
@@ -72,6 +88,8 @@ class RichInlineRenderer:
 
         if isinstance(message, StepStarted):
             self._step(message)
+        elif isinstance(message, AssistantDelta):
+            self._delta(message)
         elif isinstance(message, AssistantThought):
             self._thought(message)
         elif isinstance(message, ToolUse):
@@ -82,9 +100,20 @@ class RichInlineRenderer:
             self._final(message)
         elif isinstance(message, SystemNotice):
             self._notice(message)
+        elif isinstance(message, SubagentStarted):
+            self._subagent_started(message)
+        elif isinstance(message, SubagentToolUse):
+            self._subagent_tool_use(message)
+        elif isinstance(message, SubagentToolResult):
+            self._subagent_tool_result(message)
+        elif isinstance(message, SubagentDone):
+            self._subagent_done(message)
 
     def _step(self, message: StepStarted) -> None:
         self.console.print(f"\n[dim]Step {message.step}/{message.max_steps}[/dim]")
+
+    def _delta(self, message: AssistantDelta) -> None:
+        self.console.print(message.text, end="")
 
     def _thought(self, message: AssistantThought) -> None:
         from rich.markup import escape
@@ -123,8 +152,41 @@ class RichInlineRenderer:
         self.console.print(f"[bold {color}]● {message.level.title()}[/bold {color}]")
         self.console.print(f"[dim]  ⎿[/dim] {escape(message.text)}")
 
+    def _subagent_started(self, message: SubagentStarted) -> None:
+        from rich.markup import escape
+
+        label = escape(message.name)
+        self.console.print(f"[bold cyan]● Subagent[/bold cyan] {label} [dim]started[/dim]")
+
+    def _subagent_tool_use(self, message: SubagentToolUse) -> None:
+        from rich.markup import escape
+
+        label = message.display_name or message.name
+        self.console.print(
+            f"[dim]  ●[/dim] [yellow]{escape(label)}[/yellow]([dim]{escape(_format_tool_input(message.tool_input))}[/dim])"
+        )
+
+    def _subagent_tool_result(self, message: SubagentToolResult) -> None:
+        from rich.markup import escape
+
+        self.console.print(f"[dim]    ⎿[/dim] {escape(_truncate_for_terminal(message.output))}")
+
+    def _subagent_done(self, message: SubagentDone) -> None:
+        from rich.markup import escape
+
+        status = "completed" if message.ok else "failed"
+        self.console.print(
+            f"[bold cyan]● Subagent[/bold cyan] {escape(message.name)} [dim]{status}: {escape(message.transcript_path)}[/dim]"
+        )
+
 
 def _format_tool_input(value: object) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False)
+
+
+def _truncate_for_terminal(text: str, max_length: int = 1000) -> str:
+    if len(text) <= max_length:
+        return text
+    return text[:max_length] + "\n... (truncated)"

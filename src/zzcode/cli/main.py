@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Callable
 
@@ -25,7 +26,7 @@ def main() -> int:
 
     ui = create_ui()
     try:
-        llm = ZzCodeLLM(stream=False)
+        llm = ZzCodeLLM(stream=_streaming_enabled())
     except Exception as exc:
         ui.error(f"Failed to initialize LLM: {exc}")
         return 1
@@ -45,6 +46,7 @@ def main() -> int:
             base_registry=tools,
             permission_checker=_request_cli_permission,
             session_context_provider=lambda: "",
+            renderer=ui,
         )
     )
     ui.banner(model=llm.model or "(unknown)", tools=tools)
@@ -131,5 +133,14 @@ def _request_cli_permission(request: ToolPermissionRequest) -> ToolPermissionRes
     if answer in {"y", "yes"}:
         return ToolPermissionResult.allow(reason="cli_allow_once")
     return ToolPermissionResult.deny("Tool execution denied by user.", reason="cli_denied")
+
+
+def _streaming_enabled() -> bool:
+    """读取流式输出开关。"""
+
+    raw = os.getenv("ZZCODE_STREAM", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

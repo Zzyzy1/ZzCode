@@ -12,13 +12,14 @@ from zzcode.agent.context_budget import (
     check_context_budget,
     max_turns_from_env,
 )
-from zzcode.llm.client import ChatClient, LLMToolCall
+from zzcode.llm.client import ChatClient, LLMResponse, LLMToolCall
 from zzcode.logging import log_debug
 from zzcode.tools.base import PermissionChecker, ToolCall, ToolContext
 from zzcode.tools.registry import ToolRegistry
 from zzcode.tools.results import ToolResult as StructuredToolResult
 from zzcode.tools.runner import ToolRunner
 from zzcode.ui.messages import (
+    AssistantDelta,
     AssistantThought,
     FinalAnswer,
     StepStarted,
@@ -140,10 +141,7 @@ class ToolCallAgent:
             )
             self.renderer.render(StepStarted(step, self.max_steps))
             llm_started_at = time.perf_counter()
-            response = self.llm_client.chat(
-                self.messages,
-                tools=tools,
-            )
+            response = self._request_llm_response(self.messages, tools)
             log_debug(
                 f"step llm returned step={step} ok={response is not None} elapsed_ms={(time.perf_counter() - llm_started_at) * 1000:.1f}",
                 level="info",
@@ -224,6 +222,40 @@ class ToolCallAgent:
             component="agent",
         )
         return None
+
+    def _request_llm_response(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse | None:
+        """请求模型；可用时流式收集，否则走普通 chat。"""
+
+        if getattr(self.llm_client, "stream", False) and hasattr(self.llm_client, "stream_chat"):
+            streamed = self._request_streaming_response(messages, tools)
+            if streamed is not None:
+                return streamed
+            log_debug("stream response failed; falling back to non-stream chat", level="warn", component="agent")
+        return self.llm_client.chat(messages, tools=tools)
+
+    def _request_streaming_response(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse | None:
+        """收集流式响应，同时把文本 delta 交给 renderer。"""
+
+        stream_chat = getattr(self.llm_client, "stream_chat", None)
+        if not callable(stream_chat):
+            return None
+        accumulator = _StreamResponseAccumulator()
+        try:
+            for event in stream_chat(messages, tools=tools):
+                if event.type == "content_delta":
+                    accumulator.add_content(event.text)
+                    self.renderer.render(AssistantDelta(event.text))
+                elif event.type == "tool_call_delta" and event.tool_call_delta is not None:
+                    accumulator.add_tool_call_delta(event.tool_call_delta)
+                elif event.type == "error":
+                    log_debug(f"stream event error error={event.error}", level="warn", component="agent")
+                    return None
+                elif event.type == "message_done":
+                    break
+        except Exception as exc:
+            log_debug(f"stream response exception error={exc}", level="warn", component="agent")
+            return None
+        return accumulator.to_response()
 
     def estimate_context_tokens(self, question: str, session_context: str = "") -> int:
         """估算一次新 turn 初始上下文 token 数。"""
@@ -351,3 +383,76 @@ def _counts_as_loop_failure(result: StructuredToolResult) -> bool:
         "validation_failed",
         "tool_exception",
     }
+
+
+class _StreamResponseAccumulator:
+    """把 OpenAI-compatible streaming delta 还原为 LLMResponse。"""
+
+    def __init__(self) -> None:
+        self.content_parts: list[str] = []
+        self.tool_calls: dict[int, dict[str, Any]] = {}
+
+    def add_content(self, text: str) -> None:
+        self.content_parts.append(text)
+
+    def add_tool_call_delta(self, delta: dict[str, Any]) -> None:
+        index = int(delta.get("index") or 0)
+        current = self.tool_calls.setdefault(
+            index,
+            {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+        )
+        if delta.get("id"):
+            current["id"] = str(delta["id"])
+        if delta.get("type"):
+            current["type"] = str(delta["type"])
+        function_delta = delta.get("function")
+        if isinstance(function_delta, dict):
+            function = current.setdefault("function", {"name": "", "arguments": ""})
+            if function_delta.get("name"):
+                function["name"] = str(function_delta["name"])
+            if function_delta.get("arguments"):
+                function["arguments"] = str(function.get("arguments") or "") + str(function_delta["arguments"])
+
+    def to_response(self) -> LLMResponse:
+        tool_calls: list[LLMToolCall] = []
+        for index in sorted(self.tool_calls):
+            raw = self.tool_calls[index]
+            function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+            name = str(function.get("name") or raw.get("name") or "")
+            if not name:
+                continue
+            arguments, parse_error = _parse_stream_arguments(function.get("arguments", ""))
+            raw_id = str(raw.get("id") or f"call_{index}")
+            tool_calls.append(
+                LLMToolCall(
+                    id=raw_id,
+                    name=name,
+                    arguments=arguments,
+                    raw={
+                        "id": raw_id,
+                        "type": raw.get("type") or "function",
+                        "function": {
+                            "name": name,
+                            "arguments": function.get("arguments") or "",
+                        },
+                    },
+                    parse_error=parse_error,
+                )
+            )
+        return LLMResponse(content="".join(self.content_parts), tool_calls=tool_calls)
+
+
+def _parse_stream_arguments(value: object) -> tuple[dict[str, Any], str | None]:
+    if isinstance(value, dict):
+        return value, None
+    if value in (None, ""):
+        return {}, None
+    if not isinstance(value, str):
+        return {}, f"Tool arguments must be JSON object string, got {type(value).__name__}."
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        return {}, f"Tool arguments JSON parse failed: {exc}"
+    if not isinstance(parsed, dict):
+        return {}, f"Tool arguments must decode to JSON object, got {type(parsed).__name__}."
+    return parsed, None

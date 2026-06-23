@@ -38,6 +38,39 @@ ZzCode 对应原则：
 4. 系统 memory worker 也使用结构化工具调用，不再输出 `Thought/Action`。
 5. 旧文本 ReAct 只能留在历史文档或学习归档中，不能继续存在于 `src/` 的运行路径。
 
+## Claude Code 流式与进度参考
+
+本节只参考 Claude Code 的关键主链路，不照搬完整实现。
+
+关键文件：
+
+```text
+claude-code-sourcemap/restored-src/src/query.ts
+claude-code-sourcemap/restored-src/src/QueryEngine.ts
+claude-code-sourcemap/restored-src/src/services/tools/StreamingToolExecutor.ts
+claude-code-sourcemap/restored-src/src/remote/sdkMessageAdapter.ts
+```
+
+Claude 的模式：
+
+1. `query()` / `queryLoop()` 是 `AsyncGenerator`，主循环不等完整回合结束，而是持续 `yield`：
+   - `stream_request_start`
+   - `stream_event`
+   - assistant message
+   - tool result message
+   - tombstone / error / max turns 等控制消息
+2. 模型调用通过 streaming 接口返回增量事件；`QueryEngine` 再把 `stream_event` 转为 SDK / remote 前端可消费事件。
+3. tool use 是否继续循环不依赖 `stop_reason`，而是在 streaming 过程中观察是否出现 `tool_use` block；只要有 tool_use，就执行工具并继续下一轮。
+4. Claude 有 `StreamingToolExecutor`：tool_use block 一到就可以进入工具队列，支持并发安全判断、顺序结果、progress message、abort、fallback 后 tombstone 清理。
+5. subagent / sidechain 不是另一套协议，而是同一个 query loop 的不同 `agentId`、tool set、permission context 和 transcript 位置。
+
+ZzCode 暂不直接实现 Claude 的完整 `StreamingToolExecutor`，因为它会引入较重的并发、回滚、顺序和中断处理。第八阶段先借鉴更直接有效的部分：
+
+- 主循环和协议支持增量事件。
+- 子 Agent 内部进度透出到前端。
+- final answer 支持文本 delta 流式输出。
+- 工具仍在完整 tool_call 到达后执行，暂不做边流边执行工具。
+
 ## 当前问题
 
 当前仍在运行路径中使用旧 ReAct：
@@ -280,6 +313,76 @@ auto-memory-extraction:
 - 如果无需更新，直接最终回答说明 skipped。
 - 不写入长期 memory，除非确实发现用户偏好、项目事实、反馈或可复用参考。
 
+### 子 Agent 可见进度和结果压缩
+
+当前前端测试暴露的问题：
+
+```text
+主回合耗时约 104s
+子 Agent 工具调用耗时约 73s
+工具本身多为 1-3ms，主要慢在 LLM 请求
+子 Agent 最后一轮输入约 74k chars，最终输出约 8k chars
+主 Agent 还要再花约 14s 总结子 Agent 结果
+```
+
+需要补两类能力：
+
+1. 子 Agent 进度透出
+   `StructuredSubagentRunner` 不能只用 `SilentRenderer`。应支持把子 Agent 的 `ToolUse`、`ToolResult`、`SystemNotice` 转成前端可识别的子事件，例如：
+
+   ```json
+   {"type": "subagent_start", "agentId": "...", "name": "general-purpose", "description": "..."}
+   {"type": "subagent_tool_use", "agentId": "...", "name": "read_file", "input": {...}}
+   {"type": "subagent_tool_result", "agentId": "...", "name": "read_file", "ok": true, "outputPreview": "..."}
+   {"type": "subagent_done", "agentId": "...", "ok": true, "transcriptPath": "..."}
+   ```
+
+   这样即使子 Agent 运行几十秒，前端也能看到它正在读目录、读文件、总结，而不是只看到父级 `agent` 工具长时间 pending。
+
+2. 子 Agent 返回给主 Agent 的结果压缩
+   `AgentTool` 不应无条件把完整 8k+ 字结果塞回主 Agent。建议增加：
+
+   ```text
+   max_result_chars 默认 3000-5000
+   返回 result_excerpt + transcript_path
+   超长结果提示主 Agent 需要细节时读取 sidechain transcript
+   ```
+
+   同时强化 `general-purpose` prompt：优先 `glob/grep` 定位，不要为了总结目录结构一次性读取过多文件。
+
+### 文本流式输出
+
+当前 `ZzCodeLLM.chat()` 固定使用：
+
+```text
+stream=false
+response.read()
+```
+
+因此前端必须等完整模型响应返回后，才能收到 `assistant_final`。第八阶段追加一个轻量流式目标：
+
+```text
+LLM stream
+  -> Agent 接收 assistant_delta
+  -> JSON Lines 输出 assistant_delta
+  -> 最终仍输出 assistant_final
+```
+
+建议新增协议事件：
+
+```json
+{"type": "assistant_delta", "text": "..."}
+{"type": "assistant_final", "text": "..."}
+```
+
+子 Agent 可选事件：
+
+```json
+{"type": "subagent_assistant_delta", "agentId": "...", "text": "..."}
+```
+
+第一版只要求 final answer 文本流式。工具调用阶段可以继续等待完整 response，因为 OpenAI-compatible tool call streaming 会把 `tool_calls.arguments` 分片返回，必须缓冲成完整 JSON 后才能安全执行。
+
 ## 迁移步骤
 
 ### Step 01：新增 RestrictedToolRegistry
@@ -374,6 +477,75 @@ rg "TextReActAgent|react_text|ToolExecutor|RestrictedToolExecutor|ThinkClient" s
 - context budget 阻断生效。
 - sidechain transcript 可回放。
 
+### Step 08：子 Agent 进度透出
+
+把 `StructuredSubagentRunner` 的内部 UI 事件转发到父级 renderer。
+
+实现要点：
+
+- 新增 `SubagentEventRenderer` 或在现有 `JsonLineRenderer` 增加子事件方法。
+- `AgentTool.call()` 创建 runner 时传入能转发事件的 renderer。
+- 系统 memory worker 默认继续静默，避免后台任务干扰用户界面。
+- sidechain transcript 继续完整记录，不依赖前端展示事件。
+
+验收：
+
+- 前端调用 `agent` 后，能看到 `subagent_start`。
+- 子 Agent 内部 `list_files/read_file/glob/grep` 能显示为子事件。
+- 子 Agent 完成后显示 `subagent_done` 和 transcript path。
+- 后台 system agents 不刷前端子事件。
+
+### Step 09：子 Agent 结果压缩和搜索优先
+
+降低主 Agent 二次总结成本。
+
+实现要点：
+
+- `AgentTool` 对子 Agent result 做长度限制，默认返回摘要片段和 transcript path。
+- 超长结果不丢失，完整内容保留在 sidechain transcript。
+- 更新内置 `general-purpose` prompt，要求先用 `glob/grep` 定位，再按需 `read_file`。
+- 在 debug log 中打印 `subagent result_chars`、`returned_chars`、`truncated=true/false`。
+
+验收：
+
+- 子 Agent 返回主 Agent 的 tool_result 不再轻易超过 3k-5k chars。
+- 同样的“检查 tools 目录”提示词，主回合总耗时明显下降。
+- 主 Agent 仍能根据摘要给出准确回答。
+
+### Step 10：final answer 文本流式输出
+
+参考 Claude 的 `stream_event` 思路，但先做轻量版，不做 streaming tool execution。
+
+实现要点：
+
+- `ZzCodeLLM` 增加 `stream_chat()`，解析 OpenAI-compatible SSE。
+- 增加 `LLMStreamEvent`，至少支持：
+  - `content_delta`
+  - `tool_call_delta`
+  - `message_done`
+  - `error`
+- `ToolCallAgent` 增加流式运行路径：
+  - 文本 delta 立即渲染 `AssistantDelta`
+  - tool_call delta 先缓冲参数
+  - tool_call 完整后再执行工具
+  - 最终仍追加完整 assistant message，保证下一轮上下文正确
+- JSON Lines 协议新增 `assistant_delta`，前端增量拼接。
+- 非 stream provider 或解析失败时，自动 fallback 到现有 `chat()`。
+- 可通过 `ZZCODE_STREAM=0` 临时关闭流式输出。
+
+验收：
+
+- 无工具调用的回答可以边生成边显示。
+- 有工具调用的任务，工具执行前后仍保持现有行为。
+- 最终仍输出 `assistant_final`，用于 transcript 和历史记录。
+- 解析失败不会破坏当前非流式链路。
+
+暂不实现：
+
+- Claude 风格完整 `StreamingToolExecutor`。
+- 工具调用边流边执行。
+- 并行工具调度、tombstone 回滚和 streaming fallback 结果清理。
+
 ## 删除标准
 
 本阶段完成后，运行时代码中不应存在：
@@ -407,6 +579,10 @@ ThinkClient
 agent run start ... max_turns=...
 context budget step=...
 tool call start ... name=agent
+subagent_start ...
+subagent_tool_use ... name=read_file
+subagent_done ...
+assistant_delta ...
 tool call end ... name=agent ok=True
 system-agents background finished ...
 ```
@@ -426,6 +602,8 @@ Action:
 - 系统 worker prompt 需要重写：旧 prompt 可能还在要求 `Thought/Action`，迁移时必须清理。
 - 旧测试数量较多：不要为了保留测试而保留旧运行路径，应重写为结构化行为测试。
 - 删除 `ThinkClient` 会影响少量 helper：统一改为 `ChatClient.chat(messages, tools=None)`。
+- 流式 tool call 参数是分片 JSON，第一版必须缓冲完整后再执行工具，避免半截参数触发错误工具调用。
+- 子 Agent 进度透出要和后台 system agents 区分开，后台任务默认静默。
 
 ## 执行进度
 
@@ -436,6 +614,9 @@ Action:
 - [x] 删除运行路径中的旧 `react_text.py`、`ToolExecutor`、forked/user runner 和旧 subagent 字符串工具。
 - [x] 删除本轮新增测试改动，改用前端和 debug 日志验收。
 - [ ] 前端实际运行验证 sidechain transcript、system agents 和权限流程。
+- [x] 子 Agent 内部进度透出到前端。
+- [x] 子 Agent result 压缩，降低主 Agent 二次总结成本。
+- [x] final answer 文本流式输出。
 
 ## 完成定义
 
@@ -445,4 +626,6 @@ Action:
 2. 所有运行时工具调用都经过 `ToolRegistry` 和 `ToolRunner`。
 3. 后台系统 Agent 不再产生 `Invalid Action format`。
 4. 旧文本 ReAct 和旧字符串工具层从 `src/` 删除或移出运行路径。
-5. README 和相关 phase 文档说明当前架构已统一为结构化 tool-call loop。
+5. 前端能看到子 Agent 进度，不再长时间只显示父级 `agent` pending。
+6. final answer 支持流式文本输出，最终仍有完整 `assistant_final`。
+7. README 和相关 phase 文档说明当前架构已统一为结构化 tool-call loop。

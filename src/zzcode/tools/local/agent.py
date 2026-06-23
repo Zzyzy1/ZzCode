@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from zzcode.llm.client import ChatClient
+from zzcode.logging import log_debug
 from zzcode.memory.session_scope import SessionScope
 from zzcode.subagents.loader import load_subagent_definitions
 from zzcode.subagents.restricted_tool_registry import build_restricted_tool_registry
@@ -16,6 +17,7 @@ from zzcode.tools.results import ToolResult
 
 
 DEFAULT_SUBAGENT_TYPE = "general-purpose"
+DEFAULT_MAX_RESULT_CHARS = 4000
 
 
 class AgentTool(BaseTool):
@@ -57,6 +59,8 @@ class AgentTool(BaseTool):
         base_registry: ToolRegistry,
         permission_checker: PermissionChecker | None = None,
         session_context_provider: Callable[[], str] | None = None,
+        renderer: object | None = None,
+        max_result_chars: int = DEFAULT_MAX_RESULT_CHARS,
     ) -> None:
         self.project_root = project_root.resolve()
         self.llm_client = llm_client
@@ -64,6 +68,8 @@ class AgentTool(BaseTool):
         self.base_registry = base_registry
         self.permission_checker = permission_checker
         self.session_context_provider = session_context_provider
+        self.renderer = renderer
+        self.max_result_chars = max_result_chars
 
     def validate_input(self, args: JsonObject) -> ToolValidationResult:
         """校验 agent 工具参数。"""
@@ -109,6 +115,7 @@ class AgentTool(BaseTool):
             llm_client=self.llm_client,
             parent_scope=self.session_scope,
             project_root=self.project_root,
+            renderer=self.renderer,
         )
         result = runner.run_definition(
             definition=definition,
@@ -129,14 +136,37 @@ class AgentTool(BaseTool):
                 ),
                 metadata={"reason": "subagent_failed", "agent_id": result.agent_id},
             )
+        result_text, truncated = _truncate_result(result.result or "", self.max_result_chars)
+        log_debug(
+            "subagent result "
+            f"agent_id={result.agent_id} "
+            f"name={result.subagent_name} "
+            f"result_chars={len(result.result or '')} "
+            f"returned_chars={len(result_text)} "
+            f"truncated={truncated}",
+            level="info",
+            component="subagents",
+        )
+        suffix = (
+            "\n\nResult was truncated before returning to the parent agent. "
+            "Use the transcript path for full details."
+            if truncated
+            else ""
+        )
         return ToolResult.success(
             tool_call_id,
             self.name,
             (
                 f"Agent {result.agent_id} completed.\n"
                 f"Subagent: {result.subagent_name}\n"
-                f"Result:\n{result.result}\n"
+                f"Result:\n{result_text}{suffix}\n"
                 f"Transcript: {result.transcript_path}"
             ),
             metadata={"agent_id": result.agent_id, "subagent_name": result.subagent_name},
         )
+
+
+def _truncate_result(text: str, max_chars: int) -> tuple[str, bool]:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text, False
+    return text[:max_chars].rstrip() + "\n... (truncated)", True

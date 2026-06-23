@@ -9,9 +9,14 @@ from typing import Any, TextIO
 
 from zzcode.logging import log_debug
 from zzcode.ui.messages import (
+    AssistantDelta,
     AssistantThought,
     FinalAnswer,
     StepStarted,
+    SubagentDone,
+    SubagentStarted,
+    SubagentToolResult,
+    SubagentToolUse,
     SystemNotice,
     ToolResult,
     ToolUse,
@@ -77,6 +82,8 @@ class JsonLineRenderer:
 
         if isinstance(message, StepStarted):
             return None
+        if isinstance(message, AssistantDelta):
+            return {"type": "assistant_delta", "text": message.text}
         if isinstance(message, AssistantThought):
             return {"type": "assistant_thought", "text": message.text}
         if isinstance(message, ToolUse):
@@ -105,6 +112,49 @@ class JsonLineRenderer:
             return {"type": "assistant_final", "text": message.text}
         if isinstance(message, SystemNotice):
             return {"type": "system_notice", "level": message.level, "text": message.text}
+        if isinstance(message, SubagentStarted):
+            return {
+                "type": "subagent_start",
+                "agentId": message.agent_id,
+                "name": message.name,
+                "description": message.description,
+                "transcriptPath": message.transcript_path,
+            }
+        if isinstance(message, SubagentToolUse):
+            tool_id = message.id or self._next_tool_id(f"subagent-{message.name}")
+            self._last_tool_id_by_name[f"{message.agent_id}:{message.name}"] = tool_id
+            return {
+                "type": "subagent_tool_use",
+                "agentId": message.agent_id,
+                "id": tool_id,
+                "name": message.name,
+                "displayName": message.display_name,
+                "input": message.tool_input,
+                "source": message.source,
+                "mcpInfo": message.mcp_info,
+            }
+        if isinstance(message, SubagentToolResult):
+            key = f"{message.agent_id}:{message.tool_name}"
+            return {
+                "type": "subagent_tool_result",
+                "agentId": message.agent_id,
+                "id": message.id or self._last_tool_id_by_name.get(key, message.tool_name),
+                "name": message.tool_name,
+                "ok": message.ok if message.ok is not None else not _looks_like_error(message.output),
+                "output": message.output,
+                "outputPreview": _preview_text(message.output),
+                "source": message.source,
+                "mcpInfo": message.mcp_info,
+            }
+        if isinstance(message, SubagentDone):
+            return {
+                "type": "subagent_done",
+                "agentId": message.agent_id,
+                "name": message.name,
+                "ok": message.ok,
+                "transcriptPath": message.transcript_path,
+                "error": message.error,
+            }
         return {"type": "system_notice", "level": "warning", "text": "未知 UI 消息类型。"}
 
     def _next_tool_id(self, tool_name: str) -> str:
@@ -140,3 +190,10 @@ def _looks_like_error(output: str) -> bool:
         "文件过大",
     )
     return output.strip().startswith(prefixes)
+
+
+def _preview_text(text: str, max_length: int = 1000) -> str:
+    compact = text.strip()
+    if len(compact) <= max_length:
+        return compact
+    return compact[:max_length] + "\n... (truncated)"

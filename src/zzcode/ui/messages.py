@@ -22,6 +22,13 @@ class AssistantThought:
 
 
 @dataclass(frozen=True)
+class AssistantDelta:
+    """模型最终回答的增量文本。"""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class ToolUse:
     """模型请求调用工具时的 UI 消息。"""
 
@@ -60,11 +67,63 @@ class SystemNotice:
     level: Literal["info", "warning", "error"] = "info"
 
 
+@dataclass(frozen=True)
+class SubagentStarted:
+    """子 Agent 开始执行。"""
+
+    agent_id: str
+    name: str
+    description: str | None = None
+    transcript_path: str | None = None
+
+
+@dataclass(frozen=True)
+class SubagentToolUse:
+    """子 Agent 内部工具调用。"""
+
+    agent_id: str
+    name: str
+    tool_input: Any
+    display_name: str | None = None
+    id: str | None = None
+    source: str = "local"
+    mcp_info: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class SubagentToolResult:
+    """子 Agent 内部工具结果。"""
+
+    agent_id: str
+    tool_name: str
+    output: str
+    id: str | None = None
+    ok: bool | None = None
+    source: str = "local"
+    mcp_info: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class SubagentDone:
+    """子 Agent 执行结束。"""
+
+    agent_id: str
+    name: str
+    ok: bool
+    transcript_path: str
+    error: str | None = None
+
+
 UiMessage: TypeAlias = (
     StepStarted
+    | AssistantDelta
     | AssistantThought
     | ToolUse
     | ToolResult
     | FinalAnswer
     | SystemNotice
+    | SubagentStarted
+    | SubagentToolUse
+    | SubagentToolResult
+    | SubagentDone
 )

@@ -62,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        llm = ZzCodeLLM(stream=False)
+        llm = ZzCodeLLM(stream=_streaming_enabled())
     except Exception as exc:
         log_error(exc, component="llm", context={"phase": "initialize"})
         writer.write({"type": "system_notice", "level": "error", "text": f"LLM 初始化失败: {exc}"})
@@ -90,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         llm_client=llm,
     )
     tools = build_tool_registry(project_root, mcp_manager=mcp_manager)
+    renderer = JsonLineRenderer(writer)
     tools.register(
         AgentTool(
             project_root=project_root,
@@ -97,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             session_scope=session_scope,
             base_registry=tools,
             permission_checker=permission_bridge.request_structured_permission,
+            renderer=renderer,
             session_context_provider=lambda: build_memory_context(
                 project_root,
                 session_memory.as_list(),
@@ -110,7 +112,6 @@ def main(argv: list[str] | None = None) -> int:
         level="info",
         component="protocol",
     )
-    renderer = JsonLineRenderer(writer)
     agent = ToolCallAgent(
         llm_client=llm,
         tool_registry=tools,
@@ -913,6 +914,13 @@ def _configure_stdio() -> None:
     for stream in (sys.stdin, sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
+
+
+def _streaming_enabled() -> bool:
+    """读取流式输出开关。"""
+
+    raw = os.getenv("ZZCODE_STREAM", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from zzcode.logging import log_debug, log_error
 
@@ -35,6 +35,17 @@ class LLMResponse:
     content: str
     tool_calls: list[LLMToolCall] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class LLMStreamEvent:
+    """模型流式响应事件。"""
+
+    type: Literal["content_delta", "tool_call_delta", "message_done", "error"]
+    text: str = ""
+    tool_call_delta: dict[str, Any] | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+    error: str | None = None
 
 
 class ChatClient(Protocol):
@@ -164,6 +175,96 @@ class ZzCodeLLM:
             )
             return None
 
+    def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0,
+    ):
+        """调用 Chat Completions 流式接口，产出标准化增量事件。"""
+
+        request_started_at = time.perf_counter()
+        message_chars = sum(len(str(message.get("content") or "")) for message in messages)
+        log_debug(
+            "stream request start "
+            f"model={self.model} "
+            f"messages={len(messages)} "
+            f"message_chars={message_chars} "
+            f"tools={len(tools or [])} "
+            f"timeout={self.timeout}",
+            level="info",
+            component="llm",
+        )
+        try:
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "stream": True,
+            }
+            if tools is not None:
+                payload["tools"] = tools
+            request = urllib.request.Request(
+                url=self._chat_completions_url(),
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                method="POST",
+            )
+            http_started_at = time.perf_counter()
+            event_count = 0
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                status_code = getattr(response, "status", "unknown")
+                log_debug(
+                    f"stream http response status={status_code} elapsed_ms={(time.perf_counter() - http_started_at) * 1000:.1f}",
+                    level="info",
+                    component="llm",
+                )
+                for payload_text in _iter_sse_payloads(response):
+                    if payload_text == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload_text)
+                    except json.JSONDecodeError as exc:
+                        yield LLMStreamEvent(type="error", error=f"stream JSON parse failed: {exc}")
+                        return
+                    event_count += 1
+                    for event in _stream_events_from_chunk(chunk):
+                        yield event
+            log_debug(
+                "stream request end "
+                f"events={event_count} "
+                f"elapsed_ms={(time.perf_counter() - request_started_at) * 1000:.1f}",
+                level="info",
+                component="llm",
+            )
+            yield LLMStreamEvent(type="message_done")
+        except urllib.error.HTTPError as exc:  # pragma: no cover - depends on remote provider
+            error_body = exc.read().decode("utf-8", errors="replace")
+            log_error(
+                exc,
+                component="llm",
+                context={
+                    "status_code": exc.code,
+                    "response_body": error_body,
+                    "elapsed_ms": f"{(time.perf_counter() - request_started_at) * 1000:.1f}",
+                },
+            )
+            yield LLMStreamEvent(type="error", error=error_body or str(exc))
+        except Exception as exc:  # pragma: no cover - depends on remote provider
+            log_error(
+                exc,
+                component="llm",
+                context={
+                    "phase": "stream_chat",
+                    "elapsed_ms": f"{(time.perf_counter() - request_started_at) * 1000:.1f}",
+                },
+            )
+            yield LLMStreamEvent(type="error", error=str(exc))
+
     def _chat_completions_url(self) -> str:
         """拼出 Chat Completions 请求地址。
 
@@ -183,6 +284,44 @@ def normalize_chat_response(body: dict[str, Any]) -> LLMResponse:
     content = message.get("content") or ""
     tool_calls = _normalize_tool_calls(message)
     return LLMResponse(content=content, tool_calls=tool_calls, raw=body)
+
+
+def _iter_sse_payloads(response: Any):
+    buffer = ""
+    for raw_line in response:
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line:
+            if buffer:
+                yield buffer
+                buffer = ""
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            value = line[len("data:") :].strip()
+            buffer = f"{buffer}\n{value}".strip() if buffer else value
+    if buffer:
+        yield buffer
+
+
+def _stream_events_from_chunk(chunk: dict[str, Any]) -> list[LLMStreamEvent]:
+    choices = chunk.get("choices") or []
+    events: list[LLMStreamEvent] = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta") or {}
+        if not isinstance(delta, dict):
+            continue
+        content = delta.get("content")
+        if isinstance(content, str) and content:
+            events.append(LLMStreamEvent(type="content_delta", text=content, raw=chunk))
+        tool_calls = delta.get("tool_calls") or []
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                if isinstance(tool_call, dict):
+                    events.append(LLMStreamEvent(type="tool_call_delta", tool_call_delta=tool_call, raw=chunk))
+    return events
 
 
 def _normalize_tool_calls(message: dict[str, Any]) -> list[LLMToolCall]:
