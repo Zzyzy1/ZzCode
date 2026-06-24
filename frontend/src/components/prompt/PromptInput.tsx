@@ -110,11 +110,11 @@ export function PromptInput({ disabled, onSubmit, onExit }: Props) {
       <Box>
         <Text color={disabled ? defaultTheme.muted : defaultTheme.accent}>zzcode</Text>
         <Text color={defaultTheme.muted}> › </Text>
-        <Text color={defaultTheme.muted}>{disabled ? "agent is running" : "Enter send · Shift+Enter newline · \\ + Enter continue · Ctrl+_ undo"}</Text>
-        <Text color={defaultTheme.muted}> · {lineCount} line{lineCount === 1 ? "" : "s"}</Text>
+        <Text color={defaultTheme.muted}>{disabled ? "agent 正在运行" : "Enter 发送 · Shift+Enter 换行 · \\ + Enter 续行 · Ctrl+_ 撤销"}</Text>
+        <Text color={defaultTheme.muted}> · 第 {lineCount} 行</Text>
       </Box>
       {disabled ? (
-        <Text color={defaultTheme.muted}>Waiting for agent events...</Text>
+        <Text color={defaultTheme.muted}>等待 agent 事件...</Text>
       ) : (
         <Box>
           <Text color={defaultTheme.muted}>{"> "}</Text>

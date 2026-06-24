@@ -16,10 +16,10 @@ type Props = {
 };
 
 const labels: Record<AgentStatus, string> = {
-  idle: "ready",
-  thinking: "thinking",
-  running_tool: "running tool",
-  done: "done"
+  idle: "就绪",
+  thinking: "思考中",
+  running_tool: "正在运行工具",
+  done: "完成"
 };
 
 /**
@@ -27,7 +27,7 @@ const labels: Record<AgentStatus, string> = {
  * status 表示 Agent 状态；appMode/backendMode/model/cwd 是当前运行上下文；返回单行状态栏。
  */
 export function StatusBar({ status, lastToolName, backendMode = "python", appMode, model, cwd, waitingForPermission = false }: Props) {
-  const activeStatus = waitingForPermission ? "waiting permission" : labels[status];
+  const activeStatus = waitingForPermission ? "等待权限确认" : labels[status];
   const color = waitingForPermission
     ? defaultTheme.warning
     : status === "done"
@@ -35,15 +35,15 @@ export function StatusBar({ status, lastToolName, backendMode = "python", appMod
       : status === "running_tool"
         ? defaultTheme.warning
         : defaultTheme.muted;
-  const toolText = lastToolName ? ` · tool: ${lastToolName}` : "";
+  const toolText = lastToolName ? ` · 工具：${lastToolName}` : "";
 
   return (
     <Box marginTop={1} flexDirection="column">
       <Text>
         <Text color={color}>● {activeStatus}{toolText}</Text>
-        <Text color={defaultTheme.muted}>  mode: {appMode}({describeMode(appMode)}) · backend: {backendMode}</Text>
+        <Text color={defaultTheme.muted}>  模式：{appMode}（{describeMode(appMode)}） · 后端：{backendMode}</Text>
       </Text>
-      <Text color={defaultTheme.muted}>model: {model} · cwd: {cwd}</Text>
+      <Text color={defaultTheme.muted}>模型：{model} · 当前目录：{cwd}</Text>
     </Box>
   );
 }
