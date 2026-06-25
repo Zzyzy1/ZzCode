@@ -2,7 +2,7 @@
 
 基于 **Python + React Ink** 的终端 Code Agent CLI，用于学习现代 AI 编程助手的工作原理。
 
-ZzCode 不是为了复刻 Claude Code，而是从**一个可运行的最小 Agent 开始，逐步扩展**——从结构化工具调用、权限确认、上下文记忆，到子 Agent 调度、MCP 接入和流式输出。每个阶段都有独立的设计文档，方便追溯设计决策。
+ZzCode 不是为了完整复刻 Claude Code 产品，而是从**一个可运行的最小 Agent 开始，逐步学习并实现其核心机制**——从结构化工具调用、权限确认、上下文记忆，到子 Agent 调度、MCP 接入、实时联网工具和并发工具执行。每个阶段都有独立的设计文档，方便追溯设计决策。
 
 ![ZzCode terminal UI](docs/img/1.png)
 
@@ -18,7 +18,11 @@ ZzCode 不是为了复刻 Claude Code，而是从**一个可运行的最小 Agen
 - **MCP stdio 接入** — 通过 `.zzcode/mcp.json` 将 MCP server 作为结构化工具来源
 - **JSON Lines 前后端协议** — 前后端通过 stdin/stdout JSONL 通信，解耦清晰，便于调试和扩展
 - **工具折叠展示** — 连续的 `read_file` / `glob` / `grep` 调用自动折叠为摘要，减少刷屏
-- **联网搜索与抓取** — 通过博查 API 的 `web_search` 获取实时搜索结果，`web_fetch` 抓取并提取网页文本内容
+- **运行时上下文注入** — Claude 风格 `currentDate` user context，处理“今天 / 最新 / 近期”时无需先探测系统日期
+- **联网搜索与抓取** — 通过博查 API 的 `web_search` 获取实时搜索结果，`web_fetch` 支持 URL 校验、HTTPS 升级、缓存、超时/大小限制、页面提取与压缩
+- **联网工具预算与收敛** — 每 turn 限制 `web_search` / `web_fetch` 调用预算，预算耗尽后要求基于已有来源回答或说明不确定
+- **Shell / PowerShell 权限分级** — Shell prompt 强调专用工具优先，`date` / `Get-Date` 等只读命令低风险处理，危险参数拒绝
+- **并发工具执行** — 对只读且安全的工具调用按批次并发执行，`ZZCODE_MAX_TOOL_CONCURRENCY` 控制最大并发数
 
 ## 快速开始
 
@@ -64,8 +68,8 @@ cd frontend && npm install && npm run build && npm start
   → JSON Lines 协议（stdin/stdout）
   → Python Agent 核心（ToolCallAgent）
   → LLM 接口（OpenAI-compatible，支持 SSE 流式）
-  → 结构化工具注册与执行（ToolRegistry + ToolRunner）
-  → 本地工具、MCP 工具、子 Agent
+  → 结构化工具注册与执行（ToolRegistry + ToolRunner，安全只读工具可并发）
+  → 本地工具、MCP 工具、联网工具、子 Agent
 ```
 
 ### 项目结构
@@ -83,7 +87,8 @@ ZzCode/
 │       │   └── tools/            ToolBlock、ToolResultView
 │       └── app/                  主题、App 根组件
 ├── src/zzcode/                   Python Agent 核心
-│   ├── agent/                    ToolCallAgent、上下文预算
+│   ├── agent/                    ToolCallAgent、上下文预算、工具并发执行
+│   ├── context/                  运行时 user context（当前日期等）
 │   ├── llm/                      OpenAI-compatible 客户端（chat + stream）
 │   ├── memory/                   Markdown 记忆、会话作用域
 │   ├── mcp/                      MCP 配置、stdio 连接
@@ -109,8 +114,9 @@ ZzCode 按阶段推进，每个阶段增加一项能力，设计决策记录在�
 | 4 | 结构化工具层 | `docs/phase-04-tools-layer.md` |
 | 5 | MCP 工具来源接入 | `docs/phase-05-mcp-layer.md` |
 | 8 | 结构化子 Agent + 流式输出 | `docs/phase-08-structured-subagents.md` |
+| 9 | Claude 上下文、搜索和 Shell 策略对齐 | `docs/phase-09-claude-context-search-shell-alignment.md` |
 
-> 阶段 6–7 已并入阶段 3 和阶段 4 的工作流。阶段 8 为当前里程碑。
+> 阶段 6–7 已并入阶段 3 和阶段 4 的工作流。阶段 9 为当前里程碑。
 
 ## MCP 配置
 
@@ -175,6 +181,7 @@ cd frontend && npx tsc -p tsconfig.json --noEmit
 - [docs/phase-05-mcp-layer.md](docs/phase-05-mcp-layer.md) — 阶段 5：MCP 接入
 - [docs/phase-05-claude-mcp-reference.md](docs/phase-05-claude-mcp-reference.md) — Claude Code MCP 实现参考
 - [docs/phase-08-structured-subagents.md](docs/phase-08-structured-subagents.md) — 阶段 8：结构化子 Agent + 流式输出
+- [docs/phase-09-claude-context-search-shell-alignment.md](docs/phase-09-claude-context-search-shell-alignment.md) — 阶段 9：Claude 上下文、搜索和 Shell 策略对齐
 
 ## License
 

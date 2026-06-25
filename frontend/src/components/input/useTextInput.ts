@@ -12,7 +12,7 @@ export function useTextInput(props: BaseTextInputProps): BaseInputState {
     [props.columns, props.cursorOffset, props.value],
   );
 
-  const cursorChar = props.showCursor ? " " : "";
+  const cursorChar = props.showCursor ? "|" : "";
 
   const commitCursor = React.useCallback((next: Cursor) => {
     if (next.text !== props.value) {
@@ -140,4 +140,3 @@ export function useTextInput(props: BaseTextInputProps): BaseInputState {
     viewportCharEnd: cursor.getViewportCharEnd(),
   };
 }
-

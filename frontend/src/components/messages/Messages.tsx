@@ -1,22 +1,49 @@
-import React from "react";
-import { Box } from "ink";
+import React, { useMemo } from "react";
+import { Box, Text } from "ink";
 import type { MessageNode } from "../../protocol/events.js";
 import { MessageRow } from "./MessageRow.js";
 import type { CollapsedToolGroupNode, ToolUseMessageNode } from "./CollapsedToolGroup.js";
 import { WelcomeScreen } from "../welcome/WelcomeScreen.js";
+import { defaultTheme } from "../../app/theme.js";
 
 type Props = {
   messages: MessageNode[];
   verbose?: boolean;
 };
 
+const MAX_DYNAMIC_EVENTS = 120;
+
 /**
  * 渲染消息列表。
  * messages 是完整事件流；返回去重后的可见消息区域。
  */
-export function Messages({ messages, verbose }: Props) {
+export const Messages = React.memo(function Messages({ messages, verbose }: Props) {
+  const hiddenCount = Math.max(0, messages.length - MAX_DYNAMIC_EVENTS);
+  const renderedMessages = useMemo(
+    () => hiddenCount > 0 ? messages.slice(hiddenCount) : messages,
+    [hiddenCount, messages],
+  );
+  const toolOutputById = useMemo(() => buildToolOutputMap(renderedMessages), [renderedMessages]);
+  const visibleMessages = useMemo(() => buildVisibleMessages(renderedMessages), [renderedMessages]);
+
+  if (messages.length === 0) {
+    return <WelcomeScreen />;
+  }
+
+  return (
+    <Box flexDirection="column" gap={1}>
+      {hiddenCount > 0 ? (
+        <Text color={defaultTheme.muted}>… 已折叠较早的 {hiddenCount} 条事件，使用 /clear 可清空当前前端消息。</Text>
+      ) : null}
+      {visibleMessages.map((message) => (
+        <MessageRow key={message.key} message={message} toolOutputById={toolOutputById} verbose={verbose} />
+      ))}
+    </Box>
+  );
+});
+
+function buildToolOutputMap(messages: MessageNode[]): Map<string, MessageNode> {
   const toolOutputById = new Map<string, MessageNode>();
-  const visibleMessages = buildVisibleMessages(messages);
 
   // 工具结果不单独成行，而是合并到对应 tool_use 中，这更接近 Claude 的阅读节奏。
   // subagent_tool_result 也通过 id 合并到对应的 subagent_tool_use。
@@ -26,17 +53,7 @@ export function Messages({ messages, verbose }: Props) {
     }
   }
 
-  if (messages.length === 0) {
-    return <WelcomeScreen />;
-  }
-
-  return (
-    <Box flexDirection="column" gap={1}>
-      {visibleMessages.map((message) => (
-        <MessageRow key={message.key} message={message} toolOutputById={toolOutputById} verbose={verbose} />
-      ))}
-    </Box>
-  );
+  return toolOutputById;
 }
 
 function buildVisibleMessages(messages: MessageNode[]): Array<MessageNode | CollapsedToolGroupNode> {

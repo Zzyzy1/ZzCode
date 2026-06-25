@@ -35,4 +35,3 @@ export type BaseInputState = {
   viewportCharOffset: number;
   viewportCharEnd: number;
 };
-

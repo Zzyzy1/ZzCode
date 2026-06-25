@@ -17,7 +17,7 @@ type Props = {
  * 渲染单条消息。
  * message 是协议事件节点；toolOutputById 用于把工具调用和结果合并展示；返回一行或一个工具块。
  */
-export function MessageRow({ message, toolOutputById, verbose }: Props) {
+export const MessageRow = React.memo(function MessageRow({ message, toolOutputById, verbose }: Props) {
   if (message.type === "collapsed_tool_group") {
     return <CollapsedToolGroup message={message} />;
   }
@@ -178,4 +178,14 @@ export function MessageRow({ message, toolOutputById, verbose }: Props) {
 
   const color = message.level === "error" ? defaultTheme.danger : message.level === "warning" ? defaultTheme.warning : defaultTheme.muted;
   return <Text color={color}>● {message.text}</Text>;
+}, areMessageRowPropsEqual);
+
+function areMessageRowPropsEqual(previous: Props, next: Props): boolean {
+  if (previous.message !== next.message || previous.verbose !== next.verbose) {
+    return false;
+  }
+  if (previous.message.type === "tool_use" || previous.message.type === "subagent_tool_use") {
+    return previous.toolOutputById.get(previous.message.id) === next.toolOutputById.get(previous.message.id);
+  }
+  return true;
 }

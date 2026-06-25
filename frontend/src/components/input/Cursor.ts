@@ -162,7 +162,7 @@ export class Cursor {
   /**
    * 参考 Claude 的 Cursor.render()：用列宽遍历确定每行光标位置。
    *
-   * cursorChar 是光标占位字符（有光标时通常是 ' '，无光标时是 ''）。
+   * cursorChar 是光标占位字符（当前 UI 使用竖线）。
    * maxVisibleLines 是最大可见行数，超出后启用 viewport 滚动。
    * 返回每行的 before / cursorChar / after 数据，用于 BaseTextInput 逐行渲染。
    */
@@ -206,7 +206,7 @@ export class Cursor {
         const segWidth = segment === "\n" ? 0 : Math.max(1, stringWidth(segment));
         const nextWidth = currentWidth + segWidth;
         if (nextWidth > cursorColumn) {
-          atCursor = segment;
+          atCursor = cursorChar ?? segment;
           cursorFound = true;
         } else {
           currentWidth = nextWidth;
@@ -214,7 +214,7 @@ export class Cursor {
         }
       }
 
-      // 光标在行尾时 atCursor 保持为 cursorChar（默认是空格），会被 inverse 渲染
+      // 光标在行尾时 atCursor 保持 cursorChar，避免空输入看不到光标。
       return {
         before: beforeCursor,
         cursorChar: atCursor,
@@ -326,4 +326,3 @@ function offsetForColumn(line: WrappedLine, graphemes: GraphemePart[], targetCol
   }
   return line.end;
 }
-

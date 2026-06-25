@@ -1,5 +1,6 @@
 import React from "react";
 import { Box, Text, useInput } from "ink";
+import { defaultTheme } from "../../app/theme.js";
 import { usePasteHandler } from "./usePasteHandler.js";
 import type { BaseInputState, BaseTextInputProps } from "./textInputTypes.js";
 
@@ -9,7 +10,7 @@ type Props = BaseTextInputProps & {
 
 /**
  * 参考 Claude 的 BaseTextInput：每行独立 `<Text>` 渲染，避免 \n 拼接导致
- * Ink 二次折行。光标字符通过 `<Text inverse>` 高亮。
+ * Ink 二次折行。避免用定时器刷新光标，否则会在用户滚动时强制重绘整屏。
  */
 export function BaseTextInput({ inputState, ...props }: Props) {
   const { wrappedOnInput, isPasting } = usePasteHandler({
@@ -38,7 +39,7 @@ export function BaseTextInput({ inputState, ...props }: Props) {
         <Text key={index}>
           {line.before}
           {line.hasCursor && showCursor ? (
-            <Text inverse>{line.cursorChar}</Text>
+            <Text color={defaultTheme.accent}>{line.cursorChar}</Text>
           ) : (
             line.cursorChar
           )}
