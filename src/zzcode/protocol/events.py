@@ -105,6 +105,8 @@ class JsonLineRenderer:
                 "name": message.tool_name,
                 "ok": message.ok if message.ok is not None else not _looks_like_error(message.output),
                 "output": message.output,
+                "data": message.data,
+                "metadata": message.metadata,
                 "source": message.source,
                 "mcpInfo": message.mcp_info,
             }
@@ -143,6 +145,8 @@ class JsonLineRenderer:
                 "ok": message.ok if message.ok is not None else not _looks_like_error(message.output),
                 "output": message.output,
                 "outputPreview": _preview_text(message.output),
+                "data": message.data,
+                "metadata": message.metadata,
                 "source": message.source,
                 "mcpInfo": message.mcp_info,
             }

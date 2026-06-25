@@ -68,6 +68,7 @@ class ListFilesTool(FileToolMixin, BaseTool):
     description = "List files in a project directory."
     display_name = "List"
     is_read_only = True
+    is_concurrency_safe = True
     input_schema = {
         "type": "object",
         "properties": {"path": _path_schema(".")},
@@ -111,6 +112,7 @@ class ReadFileTool(FileToolMixin, BaseTool):
     description = "Read a UTF-8 text file in the project when the exact path is known."
     display_name = "Read"
     is_read_only = True
+    is_concurrency_safe = True
     input_schema = {
         "type": "object",
         "properties": {

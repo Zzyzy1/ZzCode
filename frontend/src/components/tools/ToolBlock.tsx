@@ -10,14 +10,17 @@ type Props = {
   input: unknown;
   output?: string;
   ok?: boolean;
+  data?: unknown;
+  metadata?: unknown;
   source?: string;
+  verbose?: boolean;
 };
 
 /**
  * 展示一次工具调用和可选结果。
  * name/input/output 对应协议事件字段；返回 Claude 风格的工具块。
  */
-export function ToolBlock({ name, displayName, input, output, ok = true, source }: Props) {
+export function ToolBlock({ name, displayName, input, output, ok = true, data, metadata, source, verbose }: Props) {
   const label = source === "mcp" ? name : displayName ?? name;
   const summary = formatToolUseSummary(name, input, { source });
 
@@ -30,7 +33,7 @@ export function ToolBlock({ name, displayName, input, output, ok = true, source 
       </Text>
       {output ? (
         <Box paddingLeft={2}>
-          <ToolResultView toolName={name} output={output} ok={ok} />
+          <ToolResultView toolName={name} output={output} ok={ok} data={data} metadata={metadata} verbose={verbose} />
         </Box>
       ) : null}
     </Box>

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Protocol
@@ -12,9 +15,16 @@ from zzcode.agent.context_budget import (
     check_context_budget,
     max_turns_from_env,
 )
+from zzcode.context import (
+    build_date_change_context_message,
+    build_user_context_message,
+    get_runtime_user_context,
+)
 from zzcode.llm.client import ChatClient, LLMResponse, LLMToolCall
 from zzcode.logging import log_debug
 from zzcode.tools.base import PermissionChecker, ToolCall, ToolContext
+from zzcode.tools.local.web_fetch_summarizer import LLMWebFetchSummarizer
+from zzcode.tools.local.web_limits import WebToolBudget
 from zzcode.tools.registry import ToolRegistry
 from zzcode.tools.results import ToolResult as StructuredToolResult
 from zzcode.tools.runner import ToolRunner
@@ -39,6 +49,9 @@ DEFAULT_SYSTEM_PROMPT = """
 3. 工具返回后，根据 tool result 继续判断下一步；如果已经足够回答，直接给出最终答案。
 4. 不要输出旧文本 ReAct 的 Action 协议。
 """.strip()
+
+_MAX_TOOL_CONCURRENCY_ENV = "ZZCODE_MAX_TOOL_CONCURRENCY"
+_DEFAULT_MAX_TOOL_CONCURRENCY = 10
 
 
 class TranscriptSink(Protocol):
@@ -85,12 +98,17 @@ class ToolCallAgent:
         self.context_budget = context_budget or ContextBudgetConfig.from_env()
         self.max_consecutive_failures = max_consecutive_failures
         self.messages: list[dict[str, Any]] = []
+        self._runtime_context_date = ""
+        self._web_tool_budget = WebToolBudget.from_env()
+        self._max_tool_concurrency = _read_max_tool_concurrency()
+        self._state_lock = threading.Lock()
 
     def run(self, question: str, session_context: str = "") -> str | None:
         """执行结构化 tool call 循环。"""
 
         run_started_at = time.perf_counter()
         self.messages = self._initial_messages(question, session_context)
+        self._web_tool_budget = WebToolBudget.from_env()
         tools = self.tool_registry.to_openai_tools()
         consecutive_failures = 0
         log_debug(
@@ -106,6 +124,8 @@ class ToolCallAgent:
 
         for step in range(1, self.max_steps + 1):
             step_started_at = time.perf_counter()
+            if self._refresh_runtime_context_if_date_changed():
+                tools = self.tool_registry.to_openai_tools()
             budget_state = check_context_budget(self.messages, tools=tools, config=self.context_budget)
             log_debug(
                 "context budget "
@@ -182,21 +202,12 @@ class ToolCallAgent:
                 level="info",
                 component="agent",
             )
-            for llm_tool_call in response.tool_calls:
-                result = self._run_tool_call(llm_tool_call)
-                self.messages.append(result.to_openai_message())
-                if _is_user_denied_tool_result(result):
-                    self.renderer.render(SystemNotice("用户已拒绝工具执行，本轮任务已停止。", "warning"))
-                    log_debug(
-                        f"run end reason=user_denied step={step} elapsed_ms={(time.perf_counter() - run_started_at) * 1000:.1f}",
-                        level="warn",
-                        component="agent",
-                    )
+            batches = _partition_tool_calls(response.tool_calls, self.tool_registry)
+            for batch in batches:
+                should_stop, failures = self._run_tool_call_batch(batch)
+                consecutive_failures = 0 if not failures else consecutive_failures + failures
+                if should_stop:
                     return None
-                if _counts_as_loop_failure(result):
-                    consecutive_failures += 1
-                else:
-                    consecutive_failures = 0
                 if consecutive_failures >= self.max_consecutive_failures:
                     self.renderer.render(SystemNotice("Stopped: repeated tool failures.", "warning"))
                     log_debug(
@@ -266,6 +277,69 @@ class ToolCallAgent:
             config=self.context_budget,
         ).estimated_tokens
 
+    def _run_tool_call_batch(self, batch: dict[str, object]) -> tuple[bool, int]:
+        """执行一个工具调用批次，返回 (should_stop, failure_count)。
+
+        concurrency-safe 批次并发执行，非 safe 批次串行执行。
+        """
+        tool_calls: list[LLMToolCall] = batch["calls"]  # type: ignore[assignment]
+        is_safe: bool = batch["safe"]  # type: ignore[assignment]
+
+        if is_safe and len(tool_calls) > 1 and self._max_tool_concurrency > 1:
+            return self._run_concurrently(tool_calls)
+
+        failures = 0
+        for llm_tool_call in tool_calls:
+            result = self._run_tool_call(llm_tool_call)
+            self.messages.append(result.to_openai_message())
+            if _is_user_denied_tool_result(result):
+                self.renderer.render(SystemNotice("用户已拒绝工具执行，本轮任务已停止。", "warning"))
+                return True, failures
+            if _counts_as_loop_failure(result):
+                failures += 1
+            else:
+                failures = 0
+        return False, failures
+
+    def _run_concurrently(self, tool_calls: list[LLMToolCall]) -> tuple[bool, int]:
+        """并发执行 concurrency-safe 工具调用。
+
+        预算检查和渲染在锁内串行化，工具执行（call）阶段并发。
+        """
+        results: dict[str, StructuredToolResult] = {}
+        failures = 0
+
+        def _execute(tc: LLMToolCall) -> StructuredToolResult:
+            return self._run_tool_call(tc)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_tool_concurrency) as executor:
+            futures = {executor.submit(_execute, tc): tc for tc in tool_calls}
+            for future in concurrent.futures.as_completed(futures):
+                tc = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = StructuredToolResult.failure(
+                        tc.id,
+                        tc.name,
+                        f"Concurrent execution error: {exc}",
+                        metadata={"reason": "concurrent_execution_error"},
+                    )
+                results[tc.id] = result
+
+        # 按原始顺序追加结果
+        for tc in tool_calls:
+            result = results[tc.id]
+            self.messages.append(result.to_openai_message())
+            if _is_user_denied_tool_result(result):
+                self.renderer.render(SystemNotice("用户已拒绝工具执行，本轮任务已停止。", "warning"))
+                return True, failures
+            if _counts_as_loop_failure(result):
+                failures += 1
+            else:
+                failures = 0
+        return False, failures
+
     def _run_tool_call(self, llm_tool_call: LLMToolCall) -> StructuredToolResult:
         tool_started_at = time.perf_counter()
         tool = self.tool_registry.get(llm_tool_call.name)
@@ -281,24 +355,39 @@ class ToolCallAgent:
             level="info",
             component="agent",
         )
-        self.renderer.render(
-            ToolUse(
-                llm_tool_call.name,
-                llm_tool_call.arguments,
-                display_name,
-                id=llm_tool_call.id,
-                source=source,
-                mcp_info=mcp_info,
-            )
-        )
-        if self.transcript_sink:
-            self.transcript_sink.record_tool_use(llm_tool_call.name, llm_tool_call.arguments)
 
-        if llm_tool_call.parse_error:
+        # ── 预执行阶段（需锁保护共享状态） ──
+        with self._state_lock:
+            self.renderer.render(
+                ToolUse(
+                    llm_tool_call.name,
+                    llm_tool_call.arguments,
+                    display_name,
+                    id=llm_tool_call.id,
+                    source=source,
+                    mcp_info=mcp_info,
+                )
+            )
+            if self.transcript_sink:
+                self.transcript_sink.record_tool_use(llm_tool_call.name, llm_tool_call.arguments)
+
+            budget_result = self._web_tool_budget.reserve(llm_tool_call.name, llm_tool_call.arguments)
+            parse_error = llm_tool_call.parse_error
+
+        # ── 预算耗尽 / 参数错误：直接返回，无需解锁执行 ──
+        if budget_result is not None:
+            result = StructuredToolResult.success(
+                llm_tool_call.id,
+                llm_tool_call.name,
+                budget_result.content,
+                data=budget_result.data,
+                metadata=budget_result.metadata,
+            )
+        elif parse_error:
             result = StructuredToolResult.failure(
                 llm_tool_call.id,
                 llm_tool_call.name,
-                llm_tool_call.parse_error,
+                parse_error,
                 metadata={"reason": "arguments_parse_error"},
             )
         else:
@@ -306,7 +395,9 @@ class ToolCallAgent:
                 project_root=self.project_root,
                 session_id=self.session_id,
                 permission_checker=self.permission_checker,
+                metadata={"web_fetch_summarizer": LLMWebFetchSummarizer(self.llm_client)},
             )
+            # ── 工具执行（无锁，可并发） ──
             result = self.runner.run(
                 ToolCall(
                     id=llm_tool_call.id,
@@ -317,14 +408,18 @@ class ToolCallAgent:
                 context,
             )
 
-        if self.transcript_sink:
-            self.transcript_sink.record_tool_result(llm_tool_call.name, result.content, ok=result.ok)
-        self.renderer.render(
-            ToolResult(
-                llm_tool_call.name,
-                result.content,
-                id=llm_tool_call.id,
-                ok=result.ok,
+        # ── 后执行阶段（需锁保护共享状态） ──
+        with self._state_lock:
+            if self.transcript_sink:
+                self.transcript_sink.record_tool_result(llm_tool_call.name, result.content, ok=result.ok)
+            self.renderer.render(
+                ToolResult(
+                    llm_tool_call.name,
+                    result.content,
+                    id=llm_tool_call.id,
+                    ok=result.ok,
+                data=result.data,
+                metadata=result.metadata,
                 source=source,
                 mcp_info=mcp_info,
             )
@@ -345,8 +440,32 @@ class ToolCallAgent:
         messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
         if session_context:
             messages.append({"role": "system", "content": f"Session context:\n{session_context}"})
+        runtime_context = get_runtime_user_context()
+        self._runtime_context_date = runtime_context.current_date
+        user_context_message = build_user_context_message(runtime_context.as_sections())
+        if user_context_message is not None:
+            messages.append(user_context_message)
         messages.append({"role": "user", "content": question})
         return messages
+
+    def _refresh_runtime_context_if_date_changed(self) -> bool:
+        """长工具循环跨日期时追加新的 currentDate 提醒。"""
+
+        runtime_context = get_runtime_user_context()
+        current_date = runtime_context.current_date
+        if not self._runtime_context_date or current_date == self._runtime_context_date:
+            return False
+        message = build_date_change_context_message(self._runtime_context_date, current_date)
+        self._runtime_context_date = current_date
+        if message is None:
+            return False
+        self.messages.append(message)
+        log_debug(
+            f"runtime context date changed current_date={current_date}",
+            level="info",
+            component="agent",
+        )
+        return True
 
 
 def _assistant_message(content: str, tool_calls: list[LLMToolCall]) -> dict[str, Any]:
@@ -456,3 +575,37 @@ def _parse_stream_arguments(value: object) -> tuple[dict[str, Any], str | None]:
     if not isinstance(parsed, dict):
         return {}, f"Tool arguments must decode to JSON object, got {type(parsed).__name__}."
     return parsed, None
+
+
+def _read_max_tool_concurrency() -> int:
+    """从环境变量读取最大工具并发数。"""
+    raw = os.getenv(_MAX_TOOL_CONCURRENCY_ENV)
+    if raw is None:
+        return _DEFAULT_MAX_TOOL_CONCURRENCY
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_MAX_TOOL_CONCURRENCY
+    return max(1, value)
+
+
+def _partition_tool_calls(
+    tool_calls: list[LLMToolCall],
+    registry: ToolRegistry,
+) -> list[dict[str, object]]:
+    """按 Claude Code partitionToolCalls 思路分区。
+
+    连续 concurrency-safe 工具合并为一个并发批次；
+    非 safe 工具各自独立为串行批次。
+    """
+    batches: list[dict[str, object]] = []
+    for tc in tool_calls:
+        tool = registry.get(tc.name)
+        is_safe = bool(getattr(tool, "is_concurrency_safe", False)) if tool else False
+        if is_safe and batches and batches[-1]["safe"] is True:
+            tc_list = batches[-1]["calls"]
+            assert isinstance(tc_list, list)
+            tc_list.append(tc)
+        else:
+            batches.append({"safe": is_safe, "calls": [tc]})
+    return batches

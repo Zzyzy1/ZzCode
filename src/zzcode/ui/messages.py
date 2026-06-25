@@ -48,6 +48,8 @@ class ToolResult:
     output: str
     id: str | None = None
     ok: bool | None = None
+    data: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
     source: str = "local"
     mcp_info: dict[str, Any] | None = None
 
@@ -99,6 +101,8 @@ class SubagentToolResult:
     output: str
     id: str | None = None
     ok: bool | None = None
+    data: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
     source: str = "local"
     mcp_info: dict[str, Any] | None = None
 

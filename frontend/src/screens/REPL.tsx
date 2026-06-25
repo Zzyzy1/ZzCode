@@ -31,6 +31,7 @@ export function REPL() {
   const [state, dispatch] = useReducer(replReducer, initialState);
   const [backendMode, setBackendMode] = useState(process.env.ZZCODE_USE_MOCK === "1" ? "mock" : "python");
   const [appMode, setAppMode] = useState<AppMode>("default");
+  const [verbose, setVerbose] = useState(false);
   const [pendingPermission, setPendingPermission] = useState<PendingPermission | null>(null);
   const disabled = state.status === "thinking" || state.status === "running_tool" || pendingPermission !== null;
   const model = "deepseek-v4-flash";
@@ -107,6 +108,12 @@ export function REPL() {
       await handleMemoryCommand(value);
       return;
     }
+    if (command === "/verbose") {
+      const nextVerbose = !verbose;
+      setVerbose(nextVerbose);
+      appendNotice(`Verbose 模式已${nextVerbose ? "开启" : "关闭"}。工具结果${nextVerbose ? "展开" : "折叠"}显示。`);
+      return;
+    }
     if (command === "/exit" || command === "/quit") {
       shutdownPythonSession();
       app.exit();
@@ -124,7 +131,7 @@ export function REPL() {
   return (
     <FullscreenLayout>
       <Box flexDirection="column">
-        <Messages messages={state.messages} />
+        <Messages messages={state.messages} verbose={verbose} />
       </Box>
       <PromptInput disabled={disabled} onSubmit={handleSubmit} onExit={() => {
         shutdownPythonSession();
@@ -188,6 +195,7 @@ function helpText(): string {
     "  /compact  压缩 Python 短期会话历史",
     "  /mock     在 mock/python 后端之间切换",
     "  /mode     查看或切换模式：/mode default|readonly|plan",
+    "  /verbose  切换 verbose 模式，展开/折叠工具结果详情",
     "  /memory   查看或编辑记忆文件",
     "  /exit     退出 ZzCode",
     "",

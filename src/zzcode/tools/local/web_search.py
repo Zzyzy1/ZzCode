@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import json
 import os
-import urllib.error
-import urllib.request
 from typing import Any
 
+from zzcode.context import get_local_month_year
 from zzcode.logging import log_debug, log_error
 from zzcode.tools.base import BaseTool, JsonObject, ToolContext, ToolValidationResult
+from zzcode.tools.local.search_session import WebSearchSession, WebSearchSessionResult
 from zzcode.tools.results import ToolResult
 
 
-BOCHA_SEARCH_URL = "https://api.bocha.cn/v1/web-search"
 DEFAULT_RESULT_COUNT = 10
 
 
@@ -24,10 +22,12 @@ class WebSearchTool(BaseTool):
     description = (
         "Search the web for current information. "
         "Returns titles, URLs, and snippets from search results. "
-        "Use this tool for accessing information beyond your knowledge cutoff."
+        "Use this tool for accessing information beyond your knowledge cutoff. "
+        "For recent information, use the current date from the conversation context."
     )
     display_name = "Web Search"
     is_read_only = True
+    is_concurrency_safe = True
 
     input_schema = {
         "type": "object",
@@ -44,6 +44,34 @@ class WebSearchTool(BaseTool):
         "required": ["query"],
         "additionalProperties": False,
     }
+
+    def to_openai_tool(self) -> dict[str, Any]:
+        """生成带当前年月提示的 WebSearch schema。"""
+
+        current_month_year = get_local_month_year()
+        description = (
+            f"{self.description}\n\n"
+            "IMPORTANT - Use the correct year in search queries:\n"
+            f"- The current month is {current_month_year}. "
+            "You MUST use this year when searching for recent information, documentation, "
+            "or current events.\n"
+            "- If the user asks about today, include the full current date from the "
+            "conversation context in the query when it improves precision.\n"
+            '- Example: if the user asks for "latest React docs", search for '
+            '"React documentation" with the current year, NOT last year.\n\n'
+            "CRITICAL REQUIREMENT - You MUST follow this after using web_search:\n"
+            '- The final answer MUST include a "Sources:" section.\n'
+            "- In that section, list relevant URLs from search results as markdown links: [Title](URL).\n"
+            "- If the search results are insufficient, say the answer is uncertain and still include the sources checked."
+        )
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": description,
+                "parameters": self.input_schema,
+            },
+        }
 
     def validate_input(self, args: JsonObject) -> ToolValidationResult:
         query = args.get("query")
@@ -73,92 +101,74 @@ class WebSearchTool(BaseTool):
             component="web_search",
         )
 
-        try:
-            payload = json.dumps({"query": query, "count": count, "summary": True}).encode("utf-8")
-            request = urllib.request.Request(
-                url=BOCHA_SEARCH_URL,
-                data=payload,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(request, timeout=30) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            log_error(exc, component="web_search", context={"status": exc.code, "body": error_body})
+        session = WebSearchSession(api_key=api_key)
+        search_result = session.search(query, count)
+        if search_result.error:
+            log_error(RuntimeError(search_result.error), component="web_search")
             return ToolResult.failure(
                 tid,
                 self.name,
-                f"Search API returned HTTP {exc.code}: {error_body[:300]}",
+                search_result.error,
+                data=_search_result_data(tid, search_result),
+                metadata={"reason": "web_search_error"},
             )
-        except Exception as exc:
-            log_error(exc, component="web_search")
-            return ToolResult.failure(
-                tid,
-                self.name,
-                f"Search request failed: {exc}",
-            )
-
-        code = body.get("code")
-        if code != 200:
-            msg = body.get("msg") or body.get("message") or "unknown error"
-            return ToolResult.failure(
-                tid,
-                self.name,
-                f"Search API error: {msg}",
-            )
-
-        data = body.get("data") or {}
-        web_pages = data.get("webPages") or {}
-        results = web_pages.get("value") or []
-
-        if not results:
+        if not search_result.hits:
             return ToolResult.success(
                 tid,
                 self.name,
                 f'No results found for query: "{query}"',
+                data=_search_result_data(tid, search_result),
             )
 
         # Format results for the LLM
         lines = [f'Search results for "{query}":', ""]
-        for i, item in enumerate(results, 1):
-            title = item.get("name") or "Untitled"
-            url = item.get("url") or ""
-            snippet = item.get("snippet") or ""
-            site = item.get("siteName") or ""
-            date = item.get("datePublished") or ""
-
-            lines.append(f"## {i}. [{title}]({url})")
-            if site:
-                lines[-1] += f" ({site}"
-                if date:
-                    lines[-1] += f", {date[:10]}"
+        for i, hit in enumerate(search_result.hits, 1):
+            lines.append(f"## {i}. [{hit.title}]({hit.url})")
+            if hit.site:
+                lines[-1] += f" ({hit.site}"
+                if hit.date:
+                    lines[-1] += f", {hit.date}"
                 lines[-1] += ")"
-            elif date:
-                lines[-1] += f" ({date[:10]})"
-            if snippet:
+            elif hit.date:
+                lines[-1] += f" ({hit.date})"
+            if hit.snippet:
                 # Truncate long snippets
-                short = snippet[:300].strip()
-                if len(snippet) > 300:
+                short = hit.snippet[:300].strip()
+                if len(hit.snippet) > 300:
                     short += "..."
                 lines.append(f"   {short}")
             lines.append("")
 
-        total = web_pages.get("totalEstimatedMatches", len(results))
         lines.append(
-            f"— {len(results)} result(s) shown, approximately {total} total matches. "
+            f"— {len(search_result.hits)} result(s) shown, approximately {search_result.total_estimated_matches} total matches. "
             "Use web_fetch to read full page content if needed."
         )
+        lines.append("When answering with web information, cite the relevant source URLs from these results.")
 
         content = "\n".join(lines)
 
         log_debug(
-            f"web search end query={query[:80]} results={len(results)} chars={len(content)}",
+            f"web search end query={query[:80]} results={len(search_result.hits)} chars={len(content)}",
             level="info",
             component="web_search",
         )
 
-        return ToolResult.success(tid, self.name, content)
+        return ToolResult.success(
+            tid,
+            self.name,
+            content,
+            data=_search_result_data(tid, search_result),
+        )
+
+
+def _search_result_data(tool_call_id: str, result: WebSearchSessionResult) -> dict[str, Any]:
+    sources = result.sources
+    return {
+        "query": result.query,
+        "results": [{"tool_use_id": tool_call_id, "content": sources}] if sources else [],
+        "sources": sources,
+        "totalEstimatedMatches": result.total_estimated_matches,
+        "searchCount": result.search_count,
+        "durationSeconds": result.duration_seconds,
+        "exhausted": result.exhausted,
+    }

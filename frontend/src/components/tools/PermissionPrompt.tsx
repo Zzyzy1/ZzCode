@@ -62,6 +62,16 @@ export function PermissionPrompt({ request, onDecision }: Props) {
         <Text color={defaultTheme.muted}>({formatInput(request.input)})</Text>
       </Text>
       <Text color={defaultTheme.muted}>risk: {request.risk} · ↑/↓ select · Enter confirm</Text>
+      {request.riskReason ? <Text color={defaultTheme.muted}>reason: {request.riskReason}</Text> : null}
+      {request.suggestedRules && request.suggestedRules.length > 0 ? (
+        <Box flexDirection="column">
+          {request.suggestedRules.map((rule) => (
+            <Text key={`${rule.kind}:${rule.description}`} color={defaultTheme.muted}>
+              rule: {rule.label} - {rule.description}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
       {request.preview?.type === "write_file_diff" ? <DiffPreview preview={request.preview} /> : null}
       <Box flexDirection="column" marginTop={1}>
         {permissionOptions.map((option, index) => {

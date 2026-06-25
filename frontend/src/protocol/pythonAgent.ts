@@ -78,6 +78,7 @@ class PythonAgentSession {
     while (true) {
       const event = await this.queue.next();
       if (event.type === "request_done") {
+        yield event;
         return;
       }
       if (event.type === "permission_request") {

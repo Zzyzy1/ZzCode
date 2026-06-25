@@ -150,6 +150,7 @@ class BaseTool:
     is_read_only = False
     is_destructive = False
     requires_approval = False
+    is_concurrency_safe = False
     source = "local"
     mcp_info: dict[str, Any] | None = None
 

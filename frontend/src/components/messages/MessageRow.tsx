@@ -10,13 +10,14 @@ import { CollapsedToolGroup, type CollapsedToolGroupNode } from "./CollapsedTool
 type Props = {
   message: MessageNode | CollapsedToolGroupNode;
   toolOutputById: Map<string, MessageNode>;
+  verbose?: boolean;
 };
 
 /**
  * 渲染单条消息。
  * message 是协议事件节点；toolOutputById 用于把工具调用和结果合并展示；返回一行或一个工具块。
  */
-export function MessageRow({ message, toolOutputById }: Props) {
+export function MessageRow({ message, toolOutputById, verbose }: Props) {
   if (message.type === "collapsed_tool_group") {
     return <CollapsedToolGroup message={message} />;
   }
@@ -60,7 +61,10 @@ export function MessageRow({ message, toolOutputById }: Props) {
         input={message.input}
         output={result?.type === "tool_result" ? result.output : undefined}
         ok={result?.type === "tool_result" ? result.ok : true}
+        data={result?.type === "tool_result" ? result.data : undefined}
+        metadata={result?.type === "tool_result" ? result.metadata : undefined}
         source={message.source}
+        verbose={verbose}
       />
     );
   }
@@ -85,9 +89,12 @@ export function MessageRow({ message, toolOutputById }: Props) {
             {summary !== null && summary !== "" ? `(${typeof summary === "string" ? summary : ""})` : ""}
           </Text>
         </Text>
-        <Box paddingLeft={2}>
+        <Box flexDirection="column" paddingLeft={2}>
           {summary !== null && summary !== "" && typeof summary !== "string" ? summary : null}
-          <Text color={defaultTheme.muted}>等待确认，风险级别：{message.risk}</Text>
+          <Text color={defaultTheme.muted}>等待确认 · 风险级别：{message.risk}</Text>
+          {message.riskReason ? (
+            <Text color={defaultTheme.muted}>  {message.riskReason}</Text>
+          ) : null}
         </Box>
       </Box>
     );
@@ -138,6 +145,7 @@ export function MessageRow({ message, toolOutputById }: Props) {
           output={output}
           ok={ok}
           source={message.source}
+          verbose={verbose}
         />
       </Box>
     );

@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "memory": {
+      "type": "stdio",
+      "command": "D:\\nodejs\\npx.cmd",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "env": {},
+      "enabled": true,
+      "timeout_seconds": 30
+    },
+    "git": {
+      "type": "stdio",
+      "command": "C:\\Users\\syz\\.local\\bin\\uvx.exe",
+      "args": [
+        "mcp-server-git",
+        "--repository",
+        "D:\\zzy\\JavaLearn\\agent_learn\\ZzCode"
+      ],
+      "env": {},
+      "enabled": true,
+      "timeout_seconds": 30
+    }
+  }
+}

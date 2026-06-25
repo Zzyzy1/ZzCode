@@ -14,7 +14,16 @@ class ProtocolToolEventsTest(unittest.TestCase):
         renderer = JsonLineRenderer(JsonLineEventWriter(output))
 
         renderer.render(ToolUse("read_file", {"path": "README.md"}, "Read", id="call_read"))
-        renderer.render(ToolResult("read_file", "content", id="call_read", ok=True))
+        renderer.render(
+            ToolResult(
+                "read_file",
+                "content",
+                id="call_read",
+                ok=True,
+                data={"path": "README.md"},
+                metadata={"reason": "test"},
+            )
+        )
 
         events = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(events[0]["type"], "tool_use")
@@ -23,6 +32,8 @@ class ProtocolToolEventsTest(unittest.TestCase):
         self.assertEqual(events[1]["type"], "tool_result")
         self.assertEqual(events[1]["id"], "call_read")
         self.assertTrue(events[1]["ok"])
+        self.assertEqual(events[1]["data"], {"path": "README.md"})
+        self.assertEqual(events[1]["metadata"], {"reason": "test"})
 
     def test_jsonl_renderer_uses_explicit_tool_result_ok(self) -> None:
         output = io.StringIO()
@@ -59,6 +70,9 @@ class ProtocolToolEventsTest(unittest.TestCase):
         self.assertEqual(event["summary"], "Write notes.md")
         self.assertTrue(event["isDestructive"])
         self.assertEqual(event["risk"], "medium")
+        self.assertIn("writes file content", event["riskReason"])
+        self.assertEqual(event["suggestedRules"][0]["kind"], "once")
+        self.assertEqual(event["suggestedRules"][-1]["kind"], "session")
         self.assertEqual(event["preview"]["type"], "write_file_diff")
 
     def test_permission_bridge_legacy_request_still_returns_bool(self) -> None:
@@ -72,6 +86,9 @@ class ProtocolToolEventsTest(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertEqual(event["input"], {"command": "echo hi"})
         self.assertEqual(event["risk"], "high")
+        self.assertIn("Shell commands", event["riskReason"])
+        exact_rules = [rule for rule in event["suggestedRules"] if rule["kind"] == "exact"]
+        self.assertEqual(exact_rules[0]["description"], "echo hi")
 
 
 if __name__ == "__main__":

@@ -39,6 +39,7 @@ def register_builtin_structured_tools(registry: ToolRegistry) -> None:
         WriteFileTool,
     )
     from .local.search import GlobTool, GrepTool
+    from .local.powershell import RunPowerShellTool
     from .local.shell import RunShellTool
     from .local.web_fetch import WebFetchTool
     from .local.web_search import WebSearchTool
@@ -51,6 +52,7 @@ def register_builtin_structured_tools(registry: ToolRegistry) -> None:
     registry.register(EditFileTool())
     registry.register(AppendFileTool())
     registry.register(RunShellTool())
+    registry.register(RunPowerShellTool())
     registry.register(WebSearchTool())
     registry.register(WebFetchTool())
 

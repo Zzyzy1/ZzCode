@@ -37,6 +37,7 @@ class SearchToolMixin:
 
     is_read_only = True
     requires_approval = False
+    is_concurrency_safe = True
 
     def validate_input(self, args: JsonObject) -> ToolValidationResult:
         """校验搜索参数。"""

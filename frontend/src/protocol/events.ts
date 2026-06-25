@@ -46,6 +46,8 @@ export type ToolResultEvent = {
   name: string;
   output: string;
   ok: boolean;
+  data?: unknown;
+  metadata?: unknown;
   source?: string;
   mcpInfo?: McpInfo | null;
 };
@@ -78,9 +80,17 @@ export type PermissionRequestEvent = {
   summary?: string;
   isDestructive?: boolean;
   risk: PermissionRisk;
+  riskReason?: string;
+  suggestedRules?: PermissionSuggestedRule[];
   preview?: PermissionPreview | null;
   source?: string;
   mcpInfo?: McpInfo | null;
+};
+
+export type PermissionSuggestedRule = {
+  kind: "once" | "exact" | "prefix" | "domain" | "session";
+  label: string;
+  description: string;
 };
 
 export type McpInfo = {
@@ -135,6 +145,8 @@ export type SubagentToolResultEvent = {
   ok: boolean;
   output: string;
   outputPreview?: string;
+  data?: unknown;
+  metadata?: unknown;
   source?: string;
   mcpInfo?: McpInfo | null;
 };

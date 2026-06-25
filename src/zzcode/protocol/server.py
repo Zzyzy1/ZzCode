@@ -528,6 +528,8 @@ class PermissionBridge:
                 "summary": request.summary,
                 "isDestructive": request.is_destructive,
                 "risk": _classify_tool_risk(request.tool_name),
+                "riskReason": _build_permission_risk_reason(request),
+                "suggestedRules": _build_permission_suggested_rules(request),
                 "preview": _build_permission_preview(request.tool_name, request.args),
                 "source": request.source,
                 "mcpInfo": request.mcp_info,
@@ -582,11 +584,88 @@ def _classify_tool_risk(tool_name: str) -> str:
 
     if tool_name == "run_shell":
         return "high"
+    if tool_name == "run_powershell":
+        return "high"
     if tool_name in {"write_file", "edit_file", "append_file"}:
         return "medium"
     if _is_mcp_tool_name(tool_name):
         return "medium"
     return "low"
+
+
+def _build_permission_risk_reason(request: ToolPermissionRequest) -> str:
+    """生成权限请求的风险原因，供前端直接展示。"""
+
+    if request.tool_name == "web_fetch":
+        domain_rule = _build_web_fetch_domain_rule(request)
+        if domain_rule:
+            return f"WebFetch will make a read-only GET request to {domain_rule}."
+        return "WebFetch will make a read-only GET request to an external URL."
+    if request.tool_name == "run_shell":
+        return "Shell commands can execute programs and may read, modify, or delete project files."
+    if request.tool_name == "run_powershell":
+        return "PowerShell commands can execute programs and may read, modify, or delete project files."
+    if request.tool_name == "write_file":
+        return "This writes file content inside the project."
+    if request.tool_name == "edit_file":
+        return "This edits existing file content inside the project."
+    if request.tool_name == "append_file":
+        return "This appends content to a file inside the project."
+    if _is_mcp_tool_name(request.tool_name):
+        return "This external MCP tool may access capabilities outside local built-in tools."
+    if request.is_destructive:
+        return "This tool is marked destructive and needs confirmation before running."
+    return "This tool is low risk, but confirmation was requested by the tool policy."
+
+
+def _build_permission_suggested_rules(request: ToolPermissionRequest) -> list[dict[str, str]]:
+    """生成可展示的权限规则建议。"""
+
+    rules = [{"kind": "once", "label": "Allow once", "description": "Only allow this tool call."}]
+    domain_rule = _build_web_fetch_domain_rule(request)
+    if domain_rule:
+        rules.append({"kind": "domain", "label": "Domain", "description": domain_rule})
+    exact = _build_exact_permission_rule(request)
+    if exact and exact != domain_rule:
+        rules.append({"kind": "exact", "label": "Exact command", "description": exact})
+    rules.append(
+        {
+            "kind": "session",
+            "label": "Allow for session",
+            "description": f"Allow {request.display_name or request.tool_name} for the current session.",
+        }
+    )
+    return rules
+
+
+def _build_exact_permission_rule(request: ToolPermissionRequest) -> str:
+    domain_rule = _build_web_fetch_domain_rule(request)
+    if domain_rule:
+        return domain_rule
+    if request.tool_name in {"run_shell", "run_powershell"} and isinstance(request.args, dict):
+        command = str(request.args.get("command") or "").strip()
+        if command:
+            return command
+    if request.tool_name in {"write_file", "edit_file", "append_file"}:
+        path = _extract_file_tool_path(request.tool_name, request.args)
+        if path:
+            return f"{request.tool_name}:{path}"
+    return request.summary.strip() if request.summary else ""
+
+
+def _build_web_fetch_domain_rule(request: ToolPermissionRequest) -> str:
+    if request.tool_name != "web_fetch" or not isinstance(request.args, dict):
+        return ""
+    url = str(request.args.get("url") or "").strip()
+    if not url:
+        return ""
+    try:
+        from zzcode.tools.local.web_fetch_http import normalize_fetch_url
+
+        normalized = normalize_fetch_url(url)
+    except Exception:
+        return ""
+    return f"domain:{normalized.hostname}"
 
 
 def _is_mcp_tool_name(tool_name: str) -> bool:

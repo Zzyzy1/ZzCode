@@ -8,11 +8,16 @@ type ToolUseOptions = {
 
 type ToolResultOptions = {
   ok: boolean;
+  data?: unknown;
+  metadata?: unknown;
+  verbose?: boolean;
 };
 
 type ToolUiDefinition = {
   formatToolUse?: (input: unknown, options: ToolUseOptions) => React.ReactNode | string | null;
   formatToolResult?: (output: string, options: ToolResultOptions) => React.ReactNode | null;
+  /** 如果为 true，verbose 模式下展开完整结果时不额外包装 */
+  verboseExpandsInline?: boolean;
 };
 
 const MAX_INPUT_CHARS = 160;
@@ -110,6 +115,26 @@ const TOOL_UI: Record<string, ToolUiDefinition> = {
     },
     formatToolResult: (output) => renderShellResult(output)
   },
+  web_search: {
+    formatToolUse: (input) => {
+      const value = asRecord(input);
+      const query = asString(value?.query);
+      return query ? compactMultiline(query, MAX_INPUT_CHARS) : null;
+    },
+    formatToolResult: (output, { ok, data, verbose }) =>
+      renderWebSearchResult(output, { ok, data, verbose }),
+    verboseExpandsInline: true
+  },
+  web_fetch: {
+    formatToolUse: (input) => {
+      const value = asRecord(input);
+      const url = asString(value?.url);
+      return url ? compactMultiline(url, MAX_INPUT_CHARS) : null;
+    },
+    formatToolResult: (output, { ok, data, verbose }) =>
+      renderWebFetchResult(output, { ok, data, verbose }),
+    verboseExpandsInline: true
+  },
   write_file: {
     formatToolUse: (input) => {
       const value = asRecord(input);
@@ -158,9 +183,32 @@ export function formatToolUseSummary(name: string, input: unknown, options: Tool
  * 渲染工具结果摘要。
  */
 export function renderToolResultSummary(name: string, output: string, options: ToolResultOptions): React.ReactNode | null {
-  const renderer = TOOL_UI[name]?.formatToolResult;
+  const def = TOOL_UI[name];
+  const renderer = def?.formatToolResult;
   if (renderer) {
-    return renderer(output, options);
+    const rendered = renderer(output, options);
+    // verbose 对于未自定义 verbose 展开的 renderer：在折叠摘要后追加原始 output
+    if (options.verbose && rendered !== null && !def?.verboseExpandsInline) {
+      return (
+        <Box flexDirection="column">
+          {rendered}
+          <Box paddingLeft={1} marginTop={0}>
+            <Text color={defaultTheme.muted}>
+              ── verbose ─────────────────────────────────────────
+            </Text>
+          </Box>
+          <Box paddingLeft={1}>
+            <Text color={defaultTheme.muted}>{output.slice(0, 8000)}</Text>
+          </Box>
+          <Box paddingLeft={1}>
+            <Text color={defaultTheme.muted}>
+              ────────────────────────────────────────────────────
+            </Text>
+          </Box>
+        </Box>
+      );
+    }
+    return rendered;
   }
   return options.ok ? renderFallbackResult(output) : renderErrorResult(output);
 }
@@ -176,12 +224,183 @@ function renderShellResult(output: string) {
   );
 }
 
+function renderWebSearchResult(output: string, { ok, data, verbose }: ToolResultOptions) {
+  if (!ok) {
+    return renderErrorResult(output);
+  }
+  const value = asRecord(data);
+  if (!value) {
+    return renderFallbackResult(output);
+  }
+
+  // 预算耗尽时展示明确提示，避免 "Did 0 searches" 误导用户
+  if (asNumber(value?.budget_used) !== null && asNumber(value?.budget_max) !== null) {
+    const used = asNumber(value.budget_used)!;
+    const max = asNumber(value.budget_max)!;
+    return (
+      <Box flexDirection="column">
+        <Text color={defaultTheme.warning}>
+          ⎿ ⚠ Web tool budget exhausted ({used}/{max} used)
+        </Text>
+        <Box paddingLeft={2}>
+          <Text color={defaultTheme.muted}>
+            Stop searching and answer based on available sources.
+          </Text>
+        </Box>
+        {verbose && value?.attempted ? (
+          <Box paddingLeft={2}>
+            <Text color={defaultTheme.muted}>
+              attempted: {asString(asRecord(value.attempted)?.tool) ?? "?"}
+              {" "}({compact(asString(asRecord(value.attempted)?.query) ?? asString(asRecord(value.attempted)?.url) ?? "", 80)})
+            </Text>
+          </Box>
+        ) : null}
+      </Box>
+    );
+  }
+
+  const searchCount = asNumber(value.searchCount) ?? countSearchResultBlocks(output);
+  const durationSeconds = asNumber(value.durationSeconds);
+  const sourceCount = Array.isArray(value.sources) ? value.sources.length : countMarkdownLinks(output);
+  const duration = durationSeconds === null ? "" : ` in ${formatDuration(durationSeconds)}`;
+  const summary = (
+    <Text color={defaultTheme.muted}>
+      ⎿ Did {searchCount} search{searchCount === 1 ? "" : "es"}{duration}; found {sourceCount} source
+      {sourceCount === 1 ? "" : "s"}
+    </Text>
+  );
+  if (!verbose) {
+    return summary;
+  }
+  // verbose: 展示折叠摘要 + sources 列表 + 原始 output 摘要
+  const sources = Array.isArray(value.sources) ? value.sources : [];
+  return (
+    <Box flexDirection="column">
+      {summary}
+      {sources.length > 0 ? (
+        <Box flexDirection="column" paddingLeft={2} marginTop={0}>
+          {sources.slice(0, 20).map((s: unknown, i: number) => {
+            const src = asRecord(s);
+            const title = asString(src?.title) ?? `Source ${i + 1}`;
+            const srcUrl = asString(src?.url) ?? "";
+            return (
+              <Text key={i} color={defaultTheme.muted}>
+                {i + 1}. {title} {srcUrl ? `(${compact(srcUrl, 80)})` : ""}
+              </Text>
+            );
+          })}
+          {sources.length > 20 ? (
+            <Text color={defaultTheme.muted}>... and {sources.length - 20} more sources</Text>
+          ) : null}
+        </Box>
+      ) : (
+        <Box paddingLeft={2}>
+          <Text color={defaultTheme.muted}>{compact(output, 500)}</Text>
+        </Box>
+      )}
+    </Box>
+  );
+}
+
 function renderFallbackResult(output: string) {
   return <Text color={defaultTheme.muted}>⎿ {compact(output, MAX_OUTPUT_CHARS)}</Text>;
 }
 
 function renderErrorResult(output: string) {
   return <Text color={defaultTheme.danger}>⎿ {compact(output, MAX_OUTPUT_CHARS)}</Text>;
+}
+
+function renderWebFetchResult(output: string, { ok, data, verbose }: ToolResultOptions) {
+  if (!ok) {
+    return renderErrorResult(output);
+  }
+  const value = asRecord(data);
+
+  // 预算耗尽时展示明确提示
+  if (asNumber(value?.budget_used) !== null && asNumber(value?.budget_max) !== null) {
+    const used = asNumber(value!.budget_used)!;
+    const max = asNumber(value!.budget_max)!;
+    return (
+      <Box flexDirection="column">
+        <Text color={defaultTheme.warning}>
+          ⎿ ⚠ Web tool budget exhausted ({used}/{max} used)
+        </Text>
+        <Box paddingLeft={2}>
+          <Text color={defaultTheme.muted}>
+            Stop fetching and answer based on available sources.
+          </Text>
+        </Box>
+        {verbose && value?.attempted ? (
+          <Box paddingLeft={2}>
+            <Text color={defaultTheme.muted}>
+              attempted: {asString(asRecord(value.attempted)?.tool) ?? "?"}
+              {" "}({compact(asString(asRecord(value.attempted)?.query) ?? asString(asRecord(value.attempted)?.url) ?? "", 80)})
+            </Text>
+          </Box>
+        ) : null}
+      </Box>
+    );
+  }
+
+  const bytes = asNumber(value?.bytes);
+  const url = asString(value?.url);
+  const code = asNumber(value?.code);
+  const codeText = asString(value?.codeText);
+  const cacheHit = value?.cacheHit === true;
+  const redirect = value?.redirect === true;
+  const summarySource = asString(value?.summarySource);
+  const summaryChars = asNumber(value?.summaryChars);
+
+  // 非 verbose：Claude 风格 "Received <size> (<status>)" + URL 摘要
+  if (!verbose) {
+    const sizeLabel = bytes !== null ? formatBytes(bytes) : "?B";
+    let statusLabel = "";
+    if (redirect) {
+      statusLabel = code ? `${code} redirect` : "redirect";
+    } else if (code) {
+      statusLabel = `${code}${codeText ? ` ${codeText}` : ""}`;
+    } else {
+      statusLabel = "OK";
+    }
+    const cacheNote = cacheHit ? " (cached)" : "";
+    const urlSummary = url ? ` ${compact(url, 60)}` : "";
+    return (
+      <Box flexDirection="column">
+        <Text color={defaultTheme.muted}>
+          ⎿ Received <Text bold>{sizeLabel}</Text> ({statusLabel}){cacheNote}{urlSummary}
+        </Text>
+        {summarySource && summaryChars !== null ? (
+          <Text color={defaultTheme.muted}>
+            {"  "}summary: {summaryChars} chars via {summarySource}
+          </Text>
+        ) : null}
+      </Box>
+    );
+  }
+
+  // verbose：展示摘要 + 完整提取内容
+  const sizeLabel = bytes !== null ? formatBytes(bytes) : "?B";
+  const statusLabel = redirect ? `redirect ${code ?? ""}` : `${code ?? "OK"}${codeText ? ` ${codeText}` : ""}`;
+  return (
+    <Box flexDirection="column">
+      <Text color={defaultTheme.muted}>
+        ⎿ Received <Text bold>{sizeLabel}</Text> ({statusLabel}){cacheHit ? " (cached)" : ""}
+        {url ? ` ${url}` : ""}
+      </Text>
+      {summarySource ? (
+        <Text color={defaultTheme.muted}>  summary: {summaryChars ?? "?"} chars via {summarySource}</Text>
+      ) : null}
+      <Box paddingLeft={2} marginTop={0}>
+        <Text color={defaultTheme.muted}>{compact(output, 5000)}</Text>
+      </Box>
+    </Box>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function fallbackToolUseSummary(input: unknown): string {
@@ -231,6 +450,23 @@ function asRecord(input: unknown): Record<string, unknown> | null {
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function formatDuration(seconds: number): string {
+  return seconds >= 1 ? `${Math.round(seconds)}s` : `${Math.round(seconds * 1000)}ms`;
+}
+
+function countSearchResultBlocks(output: string): number {
+  return output.includes("Search results for") ? 1 : 0;
+}
+
+function countMarkdownLinks(output: string): number {
+  const matches = output.match(/\[[^\]]+\]\(https?:\/\/[^)]+\)/g);
+  return matches?.length ?? 0;
 }
 
 function compact(value: string, maxChars: number): string {

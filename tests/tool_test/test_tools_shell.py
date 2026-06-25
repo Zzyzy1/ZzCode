@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from zzcode.tools.base import ToolCall, ToolContext, ToolPermissionRequest, ToolPermissionResult
 from zzcode.tools.builtin import build_builtin_tool_registry
 from zzcode.tools.local.shell import RunShellTool
+from zzcode.tools.local.shell_readonly import classify_read_only_shell_command
 from zzcode.tools.registry import ToolRegistry
 from zzcode.tools.runner import ToolRunner
 
@@ -15,9 +16,22 @@ class ShellToolTest(unittest.TestCase):
 
         self.assertEqual(
             [tool.name for tool in registry.list()],
-            ["list_files", "glob", "grep", "read_file", "write_file", "edit_file", "append_file", "run_shell"],
+            [
+                "list_files",
+                "glob",
+                "grep",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "append_file",
+                "run_shell",
+                "run_powershell",
+                "web_search",
+                "web_fetch",
+            ],
         )
         self.assertEqual(registry.get("run_shell").display_name, "Shell")
+        self.assertEqual(registry.get("run_powershell").display_name, "PowerShell")
 
     def test_shell_command_requires_permission(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -25,6 +39,14 @@ class ShellToolTest(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertEqual(result.metadata["reason"], "permission_checker_missing")
+
+    def test_readonly_shell_command_runs_without_permission_checker(self) -> None:
+        with TemporaryDirectory() as tmp:
+            result = _run(Path(tmp), {"command": "pwd"})
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["exit_code"], 0)
+        self.assertIn("exit_code: 0", result.content)
 
     def test_shell_command_runs_after_allow(self) -> None:
         captured: list[ToolPermissionRequest] = []
@@ -74,6 +96,21 @@ class ShellToolTest(unittest.TestCase):
         self.assertFalse(called)
         self.assertEqual(result.metadata["reason"], "dangerous_command")
 
+    def test_date_set_command_is_denied_before_permission_checker(self) -> None:
+        called = False
+
+        def checker(request: ToolPermissionRequest) -> ToolPermissionResult:
+            nonlocal called
+            called = True
+            return ToolPermissionResult.allow(reason="should_not_run")
+
+        with TemporaryDirectory() as tmp:
+            result = _run(Path(tmp), {"command": "date -s 2026-06-24"}, checker)
+
+        self.assertFalse(result.ok)
+        self.assertFalse(called)
+        self.assertEqual(result.metadata["reason"], "date_dangerous_flag")
+
     def test_timeout_returns_structured_error(self) -> None:
         with TemporaryDirectory() as tmp:
             result = _run(
@@ -94,6 +131,22 @@ class ShellToolTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.metadata["reason"], "validation_failed")
         self.assertIn("$.timeout_seconds: must be between", result.content)
+
+    def test_readonly_classifier_allows_safe_date(self) -> None:
+        self.assertEqual(classify_read_only_shell_command("date +%Y-%m-%d"), (True, "readonly_date"))
+
+    def test_readonly_classifier_rejects_date_set(self) -> None:
+        self.assertEqual(
+            classify_read_only_shell_command("date -s 2026-06-24"),
+            (False, "date_dangerous_flag"),
+        )
+
+    def test_shell_rejects_powershell_wrapper(self) -> None:
+        with TemporaryDirectory() as tmp:
+            result = _run(Path(tmp), {"command": "powershell -Command \"Get-Date\""}, _allow)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.metadata["reason"], "use_powershell_tool")
 
 
 def _run(root: Path, args: dict, permission_checker=None):

@@ -7,13 +7,14 @@ import { WelcomeScreen } from "../welcome/WelcomeScreen.js";
 
 type Props = {
   messages: MessageNode[];
+  verbose?: boolean;
 };
 
 /**
  * 渲染消息列表。
  * messages 是完整事件流；返回去重后的可见消息区域。
  */
-export function Messages({ messages }: Props) {
+export function Messages({ messages, verbose }: Props) {
   const toolOutputById = new Map<string, MessageNode>();
   const visibleMessages = buildVisibleMessages(messages);
 
@@ -32,7 +33,7 @@ export function Messages({ messages }: Props) {
   return (
     <Box flexDirection="column" gap={1}>
       {visibleMessages.map((message) => (
-        <MessageRow key={message.key} message={message} toolOutputById={toolOutputById} />
+        <MessageRow key={message.key} message={message} toolOutputById={toolOutputById} verbose={verbose} />
       ))}
     </Box>
   );

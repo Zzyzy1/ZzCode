@@ -1,3 +1,4 @@
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5,6 +6,7 @@ from tempfile import TemporaryDirectory
 from zzcode.agent.tool_call_agent import ToolCallAgent
 from zzcode.llm.client import LLMResponse, LLMToolCall
 from zzcode.tools.base import BaseTool, ToolPermissionRequest, ToolPermissionResult
+from zzcode.tools.local.web_search import WebSearchTool
 from zzcode.tools.registry import ToolRegistry
 from zzcode.tools.results import ToolResult
 from zzcode.ui.messages import FinalAnswer, SystemNotice, ToolResult as UiToolResult, ToolUse
@@ -79,6 +81,27 @@ class WriteTool(BaseTool):
         return ToolResult.success(tool_call_id, self.name, f"wrote {args['path']}")
 
 
+class FakeWebSearchTool(BaseTool):
+    name = "web_search"
+    description = "Search web."
+    display_name = "Web Search"
+    is_read_only = True
+    input_schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+        "additionalProperties": False,
+    }
+
+    def call(self, args, context, tool_call_id):
+        return ToolResult.success(
+            tool_call_id,
+            self.name,
+            f"Search results for {args['query']}\n## 1. [Source](https://example.com)",
+            data={"sources": [{"title": "Source", "url": "https://example.com"}]},
+        )
+
+
 class FakeChatClient:
     def __init__(self, responses: list[LLMResponse]) -> None:
         self.responses = responses
@@ -89,6 +112,18 @@ class FakeChatClient:
         if not self.responses:
             return None
         return self.responses.pop(0)
+
+
+class DateChangingChatClient(FakeChatClient):
+    def __init__(self, responses: list[LLMResponse], *, new_date_after_first_call: str) -> None:
+        super().__init__(responses)
+        self.new_date_after_first_call = new_date_after_first_call
+
+    def chat(self, messages, tools=None, temperature=0):
+        response = super().chat(messages, tools=tools, temperature=temperature)
+        if len(self.calls) == 1:
+            os.environ["ZZCODE_OVERRIDE_DATE"] = self.new_date_after_first_call
+        return response
 
 
 class CapturingRenderer:
@@ -111,6 +146,83 @@ class CapturingTranscript:
 
 
 class ToolCallAgentTest(unittest.TestCase):
+    def test_initial_messages_include_runtime_user_context_before_question(self) -> None:
+        previous = os.environ.get("ZZCODE_OVERRIDE_DATE")
+        os.environ["ZZCODE_OVERRIDE_DATE"] = "2026-06-24"
+        try:
+            llm = FakeChatClient([LLMResponse(content="Done.")])
+            with TemporaryDirectory() as tmp:
+                agent = ToolCallAgent(
+                    llm,
+                    _registry(ReadTool()),
+                    Path(tmp),
+                    renderer=CapturingRenderer(),
+                )
+                answer = agent.run("请查询今天的数据")
+        finally:
+            if previous is None:
+                os.environ.pop("ZZCODE_OVERRIDE_DATE", None)
+            else:
+                os.environ["ZZCODE_OVERRIDE_DATE"] = previous
+
+        self.assertEqual(answer, "Done.")
+        messages = llm.calls[0]["messages"]
+        self.assertEqual(messages[-1], {"role": "user", "content": "请查询今天的数据"})
+        self.assertEqual(messages[-2]["role"], "user")
+        self.assertIn("<system-reminder>", messages[-2]["content"])
+        self.assertIn("# currentDate", messages[-2]["content"])
+        self.assertIn("Today's date is 2026-06-24.", messages[-2]["content"])
+
+    def test_date_change_appends_context_and_refreshes_tools_schema(self) -> None:
+        previous = os.environ.get("ZZCODE_OVERRIDE_DATE")
+        os.environ["ZZCODE_OVERRIDE_DATE"] = "2026-06-30"
+        try:
+            llm = DateChangingChatClient(
+                [
+                    LLMResponse(
+                        content="I will read it.",
+                        tool_calls=[
+                            LLMToolCall(
+                                id="call_read",
+                                name="read_file",
+                                arguments={"path": "README.md"},
+                            )
+                        ],
+                    ),
+                    LLMResponse(content="Done."),
+                ],
+                new_date_after_first_call="2026-07-01",
+            )
+            with TemporaryDirectory() as tmp:
+                agent = ToolCallAgent(
+                    llm,
+                    _registry(ReadTool(), WebSearchTool()),
+                    Path(tmp),
+                    renderer=CapturingRenderer(),
+                )
+                answer = agent.run("查一下今天的数据")
+        finally:
+            if previous is None:
+                os.environ.pop("ZZCODE_OVERRIDE_DATE", None)
+            else:
+                os.environ["ZZCODE_OVERRIDE_DATE"] = previous
+
+        self.assertEqual(answer, "Done.")
+        self.assertEqual(len(llm.calls), 2)
+        first_tools = llm.calls[0]["tools"]
+        second_tools = llm.calls[1]["tools"]
+        self.assertIn("The current month is June 2026", _tool_description(first_tools, "web_search"))
+        self.assertIn("The current month is July 2026", _tool_description(second_tools, "web_search"))
+        second_messages = llm.calls[1]["messages"]
+        date_change_messages = [
+            message
+            for message in second_messages
+            if message.get("role") == "user" and "# dateChange" in str(message.get("content", ""))
+        ]
+        self.assertEqual(len(date_change_messages), 1)
+        self.assertIn("Today's date is 2026-07-01.", date_change_messages[0]["content"])
+        self.assertIn("from 2026-06-30 to 2026-07-01", date_change_messages[0]["content"])
+
     def test_read_file_tool_call_then_final_answer(self) -> None:
         llm = FakeChatClient(
             [
@@ -298,6 +410,44 @@ class ToolCallAgentTest(unittest.TestCase):
         self.assertEqual([message["tool_call_id"] for message in tool_messages], ["call_a", "call_b"])
         self.assertEqual([message["content"] for message in tool_messages], ["content of a.md", "content of b.md"])
 
+    def test_web_tool_budget_returns_convergence_result_instead_of_running_more_web_tools(self) -> None:
+        previous = os.environ.get("ZZCODE_WEB_TOOL_BUDGET")
+        os.environ["ZZCODE_WEB_TOOL_BUDGET"] = "1"
+        llm = FakeChatClient(
+            [
+                LLMResponse(
+                    content="",
+                    tool_calls=[LLMToolCall(id="call_search_1", name="web_search", arguments={"query": "first"})],
+                ),
+                LLMResponse(
+                    content="",
+                    tool_calls=[LLMToolCall(id="call_search_2", name="web_search", arguments={"query": "second"})],
+                ),
+                LLMResponse(content="I will answer from existing sources.\n\nSources:\n- [Source](https://example.com)"),
+            ]
+        )
+        try:
+            with TemporaryDirectory() as tmp:
+                agent = ToolCallAgent(
+                    llm,
+                    _registry(FakeWebSearchTool()),
+                    Path(tmp),
+                    renderer=CapturingRenderer(),
+                )
+                answer = agent.run("search twice")
+        finally:
+            if previous is None:
+                os.environ.pop("ZZCODE_WEB_TOOL_BUDGET", None)
+            else:
+                os.environ["ZZCODE_WEB_TOOL_BUDGET"] = previous
+
+        self.assertIn("Sources:", answer)
+        tool_messages = [message for message in agent.messages if message["role"] == "tool"]
+        self.assertEqual([message["tool_call_id"] for message in tool_messages], ["call_search_1", "call_search_2"])
+        self.assertIn("Search results for first", tool_messages[0]["content"])
+        self.assertIn("Web tool budget exhausted", tool_messages[1]["content"])
+        self.assertIn("Stop searching or fetching new pages now", tool_messages[1]["content"])
+
     def test_agent_can_recover_missing_file_path_with_glob(self) -> None:
         llm = FakeChatClient(
             [
@@ -415,6 +565,14 @@ def _registry(*tools: BaseTool) -> ToolRegistry:
     for tool in tools:
         registry.register(tool)
     return registry
+
+
+def _tool_description(tools: list[dict], name: str) -> str:
+    for tool in tools:
+        function = tool.get("function", {})
+        if function.get("name") == name:
+            return str(function.get("description") or "")
+    raise AssertionError(f"tool not found: {name}")
 
 
 if __name__ == "__main__":
