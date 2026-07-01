@@ -2,7 +2,7 @@
 
 基于 **Python + React Ink** 的终端 Code Agent CLI，用于学习现代 AI 编程助手的工作原理。
 
-ZzCode 不是为了完整复刻 Claude Code 产品，而是从**一个可运行的最小 Agent 开始，逐步学习并实现其核心机制**——从结构化工具调用、权限确认、上下文记忆，到子 Agent 调度、MCP 接入、实时联网工具和并发工具执行。每个阶段都有独立的设计文档，方便追溯设计决策。
+ZzCode 以 Claude Code 一类终端 Agent 的设计为参考，从**一个可运行的最小 Agent** 开始，逐步实现结构化工具调用、权限确认、上下文记忆、子 Agent 调度、MCP 接入、实时联网工具和并发工具执行。项目按阶段推进，每个阶段先保证小步可运行，再沉淀对应设计文档，方便回看取舍和实现路径。
 
 ![ZzCode terminal UI](docs/img/1.png)
 
@@ -14,9 +14,11 @@ ZzCode 不是为了完整复刻 Claude Code 产品，而是从**一个可运行�
 - **权限确认系统** — 工具执行前需用户确认，破坏性工具默认要求授权，拒绝后停止当前 turn
 - **Markdown 记忆文件** — Claude Code 风格的 `.zzcode/memory/` 目录，支持自动提取用户偏好
 - **短期会话记忆** — compact / trim / 自动摘要，带上下文预算感知
+- **Agent 主循环保护** — `ZZCODE_MAX_TURNS`、连续工具失败保护、上下文接近上限时自动 compact 或停止请求
 - **子 Agent（Subagents）** — 用户可调用的 `general-purpose` 子 Agent，以及后台系统 worker（会话记忆更新、自动记忆提取）
 - **MCP stdio 接入** — 通过 `.zzcode/mcp.json` 将 MCP server 作为结构化工具来源
 - **JSON Lines 前后端协议** — 前后端通过 stdin/stdout JSONL 通信，解耦清晰，便于调试和扩展
+- **分层日志系统** — debug / error / transcript 分流，默认落盘，`stdout` 只承载 JSON Lines 协议
 - **工具折叠展示** — 连续的 `read_file` / `glob` / `grep` 调用自动折叠为摘要，减少刷屏
 - **运行时上下文注入** — Claude 风格 `currentDate` user context，处理“今天 / 最新 / 近期”时无需先探测系统日期
 - **联网搜索与抓取** — 通过博查 API 的 `web_search` 获取实时搜索结果，`web_fetch` 支持 URL 校验、HTTPS 升级、缓存、超时/大小限制、页面提取与压缩
@@ -104,19 +106,19 @@ ZzCode/
 
 ## 学习路线
 
-ZzCode 按阶段推进，每个阶段增加一项能力，设计决策记录在独立文档中。
+ZzCode 按阶段推进，每个阶段增加一项能力，并在 `docs/` 下保留设计记录。当前路线：
 
-| 阶段 | 主题 | 文档 |
-|------|------|------|
-| 1 | ReAct + Tool Call 最小闭环 | `docs/phase-01-react-toolcall-demo.md` |
-| 2 | Memory 记忆系统（Markdown + 会话） | `docs/phase-02-memory-system.md` |
-| 3 | Subagents 子 Agent（用户 + 系统） | `docs/phase-03-subagents.md` |
-| 4 | 结构化工具层 | `docs/phase-04-tools-layer.md` |
-| 5 | MCP 工具来源接入 | `docs/phase-05-mcp-layer.md` |
-| 8 | 结构化子 Agent + 流式输出 | `docs/phase-08-structured-subagents.md` |
-| 9 | Claude 上下文、搜索和 Shell 策略对齐 | `docs/phase-09-claude-context-search-shell-alignment.md` |
+1. **ReAct + Tool Call 最小闭环**：跑通 `model -> tool_calls -> tool_result -> model` 的基本循环。
+2. **Memory 记忆系统**：引入 Markdown 记忆文件、会话记忆、自动摘要和上下文预算。
+3. **Subagents 子 Agent**：支持用户显式调用的通用子 Agent，以及后台系统 worker。
+4. **结构化工具层**：统一工具注册、参数校验、权限确认、工具结果展示和错误处理。
+5. **MCP 工具来源接入**：通过 stdio MCP server 扩展外部工具来源。
+6. **日志系统**：建立独立于 UI 的 debug / error / transcript 日志链路。
+7. **Agent 循环停止保护**：补齐最大 turn、连续失败、上下文上限和自动 compact 策略。
+8. **结构化子 Agent + 流式输出**：让子 Agent 与主 Agent 共享结构化事件和流式体验。
+9. **上下文、搜索和 Shell 策略对齐**：参考 Claude Code 的分层设计，补齐当前日期上下文、联网搜索约束和 Shell 权限语义。
 
-> 阶段 6–7 已并入阶段 3 和阶段 4 的工作流。阶段 9 为当前里程碑。
+当前重点是第 9 阶段，后续会继续完善 Plan 模式、长期 Memory、MCP resources 体验和更细粒度的工具安全策略。
 
 ## MCP 配置
 
@@ -150,7 +152,7 @@ MCP 工具会以 `mcp__<server>__<tool>` 的命名注册到工具注册表，与
 
 ZzCode 的输入系统参考了 Claude Code 的设计：
 
-- **列宽感知光标** — 光标位置基于视觉列宽（`stringWidth`）计算，而非字符偏移量，正确处理 CJK 字符和 emoji
+- **列宽感知光标** — 光标位置基于视觉列宽（`stringWidth`）计算，正确处理 CJK 字符和 emoji
 - **逐行独立渲染** — 每个视觉行是独立的 `<Text>` 元素，避免终端对 `\n` 拼接内容做二次折行
 - **Viewport 滚动** — 多行输入最多显示 10 行，超出后自动启用 viewport，光标所在行始终可见
 - **快捷键** — Enter 提交、Shift+Enter 换行、Ctrl+A/E/U/K 行操作、上下键浏览历史、Ctrl+_ 撤销
@@ -168,20 +170,6 @@ cd frontend && npm run dev
 # 前端类型检查
 cd frontend && npx tsc -p tsconfig.json --noEmit
 ```
-
-## 文档索引
-
-- [AGENTS.md](AGENTS.md) — 项目协作规则、架构约定和代码风格
-- [docs/phase-01-react-toolcall-demo.md](docs/phase-01-react-toolcall-demo.md) — 阶段 1：ReAct + Tool Call
-- [docs/phase-02-memory-system.md](docs/phase-02-memory-system.md) — 阶段 2：Memory 系统
-- [docs/phase-03-subagents.md](docs/phase-03-subagents.md) — 阶段 3：Subagents
-- [docs/phase-03-claude-subagents-reference.md](docs/phase-03-claude-subagents-reference.md) — Claude Code 子 Agent 实现参考
-- [docs/phase-04-tools-layer.md](docs/phase-04-tools-layer.md) — 阶段 4：结构化工具层
-- [docs/phase-04-claude-tools-reference.md](docs/phase-04-claude-tools-reference.md) — Claude Code 工具层实现参考
-- [docs/phase-05-mcp-layer.md](docs/phase-05-mcp-layer.md) — 阶段 5：MCP 接入
-- [docs/phase-05-claude-mcp-reference.md](docs/phase-05-claude-mcp-reference.md) — Claude Code MCP 实现参考
-- [docs/phase-08-structured-subagents.md](docs/phase-08-structured-subagents.md) — 阶段 8：结构化子 Agent + 流式输出
-- [docs/phase-09-claude-context-search-shell-alignment.md](docs/phase-09-claude-context-search-shell-alignment.md) — 阶段 9：Claude 上下文、搜索和 Shell 策略对齐
 
 ## License
 
